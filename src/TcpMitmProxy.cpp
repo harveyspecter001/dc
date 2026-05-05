@@ -957,13 +957,14 @@ void TcpMitmProxy::onNewConnection()
         return;
     }
 
+    // Antes se rechazaba la 2.ª conexión: el cliente (launcher/juego) a menudo reintenta y se quedaba bloqueado.
+    // Política: la nueva conexión sustituye a la anterior (sesión previa se cierra con teardown).
     if (client_ != nullptr) {
-        emit logLine(QStringLiteral("[PROXY] Ya hay una sesión activa; se rechaza conexión extra desde %1:%2.")
+        emit logLine(QStringLiteral(
+            "[PROXY] Nueva conexión desde %1:%2 — sesión previa se cierra y se acepta esta (reintento / reconexión).")
                          .arg(pending->peerAddress().toString())
                          .arg(pending->peerPort()));
-        pending->disconnectFromHost();
-        pending->deleteLater();
-        return;
+        teardown(QStringLiteral("sustituida por nueva conexión al listener"));
     }
 
     client_ = pending;
