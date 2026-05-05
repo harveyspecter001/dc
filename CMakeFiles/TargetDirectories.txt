@@ -1,8 +1,0 @@
-C:/Users/fabia/Desktop/proyecto1/cpp_dofus_sniffer/build2/CMakeFiles/minhook.dir
-C:/Users/fabia/Desktop/proyecto1/cpp_dofus_sniffer/build2/CMakeFiles/dofus_process_sniffer.dir
-C:/Users/fabia/Desktop/proyecto1/cpp_dofus_sniffer/build2/CMakeFiles/DofusRedirect.dir
-C:/Users/fabia/Desktop/proyecto1/cpp_dofus_sniffer/build2/CMakeFiles/DofusTestDll.dir
-C:/Users/fabia/Desktop/proyecto1/cpp_dofus_sniffer/build2/CMakeFiles/edit_cache.dir
-C:/Users/fabia/Desktop/proyecto1/cpp_dofus_sniffer/build2/CMakeFiles/rebuild_cache.dir
-C:/Users/fabia/Desktop/proyecto1/cpp_dofus_sniffer/build2/CMakeFiles/dofus_process_sniffer_autogen_timestamp_deps.dir
-C:/Users/fabia/Desktop/proyecto1/cpp_dofus_sniffer/build2/CMakeFiles/dofus_process_sniffer_autogen.dir
