@@ -1,6 +1,7 @@
 ## DofusProcessHub (C++ / Qt 6 · Windows)
 
-Proyecto autocontenido: `CMakeLists.txt`, `src/`, `third_party/minhook/`. La compilación local va a **`build/`** (ignorada por Git).
+Proyecto autocontenido: `CMakeLists.txt`, `src/`, `third_party/minhook/`. La compilación local va a **`build/`** (ignorada por Git).  
+Si migraste desde un layout viejo, puede existir **`_legacy_runtime/`** (copia local del exe/Qt anterior; también ignorada por Git).
 
 Aplicación pensada para **detectar procesos cuyo nombre contiene «Dofus»**, **selección automática**
 si solo hay uno, tabla filtrada si hay varios, **parche IPv4 en RAM** del proceso seleccionado (servidor real → `127.0.0.1`)
