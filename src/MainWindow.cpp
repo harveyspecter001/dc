@@ -778,38 +778,38 @@ MainWindow::MainWindow(QWidget* parent)
         auto* fl = new QHBoxLayout;
         protocolKindFilter_ = new QComboBox;
         protocolKindFilter_->addItem(QStringLiteral("Todos"));
-        protocolKindFilter_->addItem(QStringLiteral("IRI (Movimiento)"));
-        protocolKindFilter_->addItem(QStringLiteral("IRL (Lista)"));
-        protocolKindFilter_->addItem(QStringLiteral("ISO (Recursos)"));
-        protocolKindFilter_->addItem(QStringLiteral("IRX (Monstruos)"));
-        protocolKindFilter_->addItem(QStringLiteral("ISL (entidades)"));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::IriMovement));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::IrlList));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::IsoResources));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::IrxMonsters));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::IslEntities));
         protocolKindFilter_->addItem(QStringLiteral("COMANDO / jrt"));
         protocolKindFilter_->addItem(QStringLiteral("DATOS"));
         protocolKindFilter_->addItem(QStringLiteral("Otro / desconocido"));
-        protocolKindFilter_->addItem(QStringLiteral("IEE (Recolección)"));
-        protocolKindFilter_->addItem(QStringLiteral("IDR (ítem recibido)"));
-        protocolKindFilter_->addItem(QStringLiteral("IDY (ítem desplegado)"));
-        protocolKindFilter_->addItem(QStringLiteral("IDW (ítem desaparece)"));
-        protocolKindFilter_->addItem(QStringLiteral("ISU (sync cliente)"));
-        protocolKindFilter_->addItem(QStringLiteral("IRK (sync respuesta)"));
-        protocolKindFilter_->addItem(QStringLiteral("ISP (sync?)"));
-        protocolKindFilter_->addItem(QStringLiteral("ITV (info transfer)"));
-        protocolKindFilter_->addItem(QStringLiteral("KJ (compresión?)"));
-        protocolKindFilter_->addItem(QStringLiteral("JMW (comando monstruos)"));
-        protocolKindFilter_->addItem(QStringLiteral("JRR (respuesta comando)"));
-        protocolKindFilter_->addItem(QStringLiteral("PASO MAPA (JNR+ISP)"));
-        protocolKindFilter_->addItem(QStringLiteral("ISA (sesión/mapa)"));
-        protocolKindFilter_->addItem(QStringLiteral("ITR (tramo mapa · C→S)"));
-        protocolKindFilter_->addItem(QStringLiteral("ISH (tramo mapa · S→C)"));
-        protocolKindFilter_->addItem(QStringLiteral("ITO (tramo mapa · C→S)"));
-        protocolKindFilter_->addItem(QStringLiteral("MAPA hidrata (IUE/IUC/KNW)"));
-        protocolKindFilter_->addItem(QStringLiteral("ITX (mapa · carga)"));
-        protocolKindFilter_->addItem(QStringLiteral("KTA (mapa · clave)"));
-        protocolKindFilter_->addItem(QStringLiteral("JSA pulso (C→S)"));
-        protocolKindFilter_->addItem(QStringLiteral("JSB pulso (S→C)"));
-        protocolKindFilter_->addItem(QStringLiteral("RECO · IER snapshot"));
-        protocolKindFilter_->addItem(QStringLiteral("RECO · IEV toque"));
-        protocolKindFilter_->addItem(QStringLiteral("RECO · IEU/IET/IES"));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::IeeHarvest));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::IdrItemReceived));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::IdyItemDisplayed));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::IdwItemVanished));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::IsuClientSync));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::IrkSyncResponse));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::IspSync));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::ItvInteraction));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::KjCompression));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::JmwMonsterCmd));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::JrrCommandResponse));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::MapHopJnrIspClient));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::IsaPingClient));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::ItrMapTransitClient));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::IshMapTinyServer));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::ItoMapTransitClient));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::MapHydrateTripleServer));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::ItxMapHeavyServer));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::KtaKeyedServer));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::JsaPulseClient));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::JsbPulseServer));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::MapGatherIerSnapshotServer));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::MapGatherIevTapClient));
+        protocolKindFilter_->addItem(packetKindDisplayString(PacketKind::MapGatherIeuBundleServer));
         protocolKindFilter_->setToolTip(QStringLiteral("Filtra por tipo detectado en el payload."));
         connect(protocolKindFilter_, &QComboBox::currentIndexChanged, this, &MainWindow::onProtocolFilterChanged);
         fl->addWidget(protocolKindFilter_);
@@ -4562,6 +4562,8 @@ bool MainWindow::packetKindIntroducesResourceCandidates(PacketKind k) const
     case PacketKind::IsoResources:
     case PacketKind::ItxMapHeavyServer:
     case PacketKind::MapGatherIerSnapshotServer:
+    case PacketKind::MapGatherIevTapClient:
+    case PacketKind::MapGatherIeuBundleServer:
         return true;
     default:
         return false;
@@ -4611,6 +4613,11 @@ void MainWindow::updateGatherablesFromProtobufPayload(const QByteArray& payload,
             }
             if (sourceKind == PacketKind::MapGatherIevTapClient
                 || sourceKind == PacketKind::MapGatherIeuBundleServer) {
+                // Si llegó el toque/bundle antes del snapshot ISO/ITX/IER, forzar que exista el candidato
+                // para poder mostrar (RECO · IEU/IET/IES) / (RECO · IEV TOQUE) en la tabla.
+                if (!resourceCandidateHits_.contains(id)) {
+                    considerResourceCandidateId(id, payload, sourceKind);
+                }
                 markResourceCandidateInteracted(id, sourceKind);
             }
         }
