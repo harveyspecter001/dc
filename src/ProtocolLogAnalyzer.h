@@ -18,7 +18,16 @@ enum class PacketKind {
     IslEntities,
     IeeHarvest,
     IdrItemReceived,
+    IdyItemDisplayed,
+    IdwItemVanished,
+    IsuClientSync,
+    IrkSyncResponse,
+    KjCompression,
+    JmwMonsterCmd,
     CommandData,
+    JrrCommandResponse,
+    IspSync,
+    ItvInteraction,
 };
 
 /// Regla `min-max:Etiqueta` o `min-max:Etiqueta:categoria` (categoría: recurso | monstruo | objeto).
@@ -49,9 +58,16 @@ struct CharacterSnapshot {
     int sourcePacketIndex = -1;
 };
 
+class PacketTypeOverrides;
+
 [[nodiscard]] PacketKind classifyPacketKind(const QByteArray& payload);
 
 [[nodiscard]] QString packetKindDisplayString(PacketKind k);
+
+/// Convierte etiquetas del menú / JSON (ej. «IRI (MOVIMIENTO)») a enum; Unknown si no coincide.
+[[nodiscard]] PacketKind packetKindFromDisplayLabel(const QString& label);
+
+[[nodiscard]] QStringList standardPacketKindLabels();
 
 [[nodiscard]] QVector<IdRangeRule> defaultBuiltinIdRules();
 
@@ -67,7 +83,8 @@ void extractAnkamaTypeUrls(const QByteArray& payload, QStringList* outUrls);
 void extractProtobufStyleVarints(const QByteArray& payload, QList<quint64>* outValues);
 
 [[nodiscard]] ProtocolPacketRecord buildRecordFromPayload(int packetIndex, bool fromClient,
-                                                          const QByteArray& payload);
+                                                          const QByteArray& payload,
+                                                          const PacketTypeOverrides* overrides = nullptr);
 
 [[nodiscard]] QList<quint64> filterResourceCandidateIds(const QList<quint64>& varints,
                                                          const QVector<IdRangeRule>& extraRules = {});

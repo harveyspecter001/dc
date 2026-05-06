@@ -31,6 +31,7 @@ set(DOFPS_SOURCES
     src/IriCardinalEmulator.cpp
     src/TcpMitmProxy.cpp
     src/IdDatabase.cpp
+    src/PacketTypeOverrides.cpp
     src/ProtocolLogAnalyzer.cpp
     src/DiagnosticsLogWindow.cpp
     src/DebugCentralLog.cpp

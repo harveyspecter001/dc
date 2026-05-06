@@ -511,6 +511,15 @@ MainWindow::MainWindow(QWidget* parent)
         protocolKindFilter_->addItem(QStringLiteral("Otro / desconocido"));
         protocolKindFilter_->addItem(QStringLiteral("IEE (Recolección)"));
         protocolKindFilter_->addItem(QStringLiteral("IDR (ítem recibido)"));
+        protocolKindFilter_->addItem(QStringLiteral("IDY (ítem desplegado)"));
+        protocolKindFilter_->addItem(QStringLiteral("IDW (ítem desaparece)"));
+        protocolKindFilter_->addItem(QStringLiteral("ISU (sync cliente)"));
+        protocolKindFilter_->addItem(QStringLiteral("IRK (sync respuesta)"));
+        protocolKindFilter_->addItem(QStringLiteral("ISP (sync?)"));
+        protocolKindFilter_->addItem(QStringLiteral("ITV (interacción?)"));
+        protocolKindFilter_->addItem(QStringLiteral("KJ (compresión?)"));
+        protocolKindFilter_->addItem(QStringLiteral("JMW (comando monstruos)"));
+        protocolKindFilter_->addItem(QStringLiteral("JRR (respuesta comando)"));
         protocolKindFilter_->setToolTip(QStringLiteral("Filtra por tipo detectado en el payload."));
         connect(protocolKindFilter_, &QComboBox::currentIndexChanged, this, &MainWindow::onProtocolFilterChanged);
         fl->addWidget(protocolKindFilter_);
@@ -1190,6 +1199,12 @@ MainWindow::MainWindow(QWidget* parent)
     connect(harvestWatchTimer_, &QTimer::timeout, this, &MainWindow::onHarvestWaitTimeout);
 
     reloadIdDatabaseFromDisk();
+    {
+        QString err;
+        if (!packetTypeOverrides_.load(&err) && !err.isEmpty()) {
+            appendProxyLog(QStringLiteral("[TIPOS] %1").arg(err));
+        }
+    }
     reloadHarvestTemplateFromDisk();
 
 #ifdef Q_OS_WIN
@@ -2527,10 +2542,26 @@ QColor MainWindow::protocolKindColor(PacketKind k) const
         return Qt::cyan;
     case PacketKind::IdrItemReceived:
         return QColor(100, 255, 100);
+    case PacketKind::IdyItemDisplayed:
+        return QColor(255, 215, 120);
+    case PacketKind::IdwItemVanished:
+        return QColor(255, 160, 120);
     case PacketKind::IslEntities:
         return QColor(200, 150, 255);
+    case PacketKind::IsuClientSync:
+    case PacketKind::IrkSyncResponse:
+    case PacketKind::IspSync:
+        return QColor(120, 180, 255);
+    case PacketKind::ItvInteraction:
+        return QColor(160, 230, 190);
+    case PacketKind::KjCompression:
+        return QColor(255, 120, 200);
+    case PacketKind::JmwMonsterCmd:
+        return QColor(255, 165, 70);
     case PacketKind::CommandData:
         return QColor(255, 140, 90);
+    case PacketKind::JrrCommandResponse:
+        return QColor(255, 185, 110);
     case PacketKind::DataGeneric:
         return QColor(220, 220, 220);
     default:
@@ -2553,10 +2584,26 @@ QString MainWindow::packetTypeEmoji(PacketKind k) const
         return QStringLiteral("📋");
     case PacketKind::IdrItemReceived:
         return QStringLiteral("✅");
+    case PacketKind::IdyItemDisplayed:
+        return QStringLiteral("📌");
+    case PacketKind::IdwItemVanished:
+        return QStringLiteral("👋");
     case PacketKind::IslEntities:
         return QStringLiteral("📑");
+    case PacketKind::IsuClientSync:
+    case PacketKind::IrkSyncResponse:
+    case PacketKind::IspSync:
+        return QStringLiteral("🔄");
+    case PacketKind::ItvInteraction:
+        return QStringLiteral("🖱");
+    case PacketKind::KjCompression:
+        return QStringLiteral("🗜");
+    case PacketKind::JmwMonsterCmd:
+        return QStringLiteral("🎯");
     case PacketKind::CommandData:
         return QStringLiteral("⚙");
+    case PacketKind::JrrCommandResponse:
+        return QStringLiteral("📨");
     case PacketKind::DataGeneric:
         return QStringLiteral("📄");
     default:
@@ -2607,8 +2654,35 @@ QString MainWindow::buildProtocolPacketDetailHtml(const ProtocolPacketRecord& re
     case PacketKind::IslEntities:
         html += QStringLiteral("• Entidades / ISL<br>");
         break;
+    case PacketKind::IdyItemDisplayed:
+        html += QStringLiteral("• Ítem desplegado en el mapa (IDY)<br>");
+        break;
+    case PacketKind::IdwItemVanished:
+        html += QStringLiteral("• Ítem que desaparece (IDW)<br>");
+        break;
+    case PacketKind::IsuClientSync:
+        html += QStringLiteral("• Sincronización cliente (ISU)<br>");
+        break;
+    case PacketKind::IrkSyncResponse:
+        html += QStringLiteral("• Respuesta de sincronización (IRK)<br>");
+        break;
+    case PacketKind::IspSync:
+        html += QStringLiteral("• Sincronización / ISP<br>");
+        break;
+    case PacketKind::ItvInteraction:
+        html += QStringLiteral("• Interacción / ITV<br>");
+        break;
+    case PacketKind::KjCompression:
+        html += QStringLiteral("• Posible compresión / KJ<br>");
+        break;
+    case PacketKind::JmwMonsterCmd:
+        html += QStringLiteral("• Comando relacionado con monstruos (JMW)<br>");
+        break;
     case PacketKind::CommandData:
         html += QStringLiteral("• Comando / jrt<br>");
+        break;
+    case PacketKind::JrrCommandResponse:
+        html += QStringLiteral("• Respuesta de comando (JRR)<br>");
         break;
     case PacketKind::DataGeneric:
         html += QStringLiteral("• Datos genéricos sin URL Ankama conocida<br>");
@@ -2944,6 +3018,73 @@ void MainWindow::appendProtocolTreeItem(const ProtocolPacketRecord& r, int vecto
     }
 }
 
+void MainWindow::syncProtocolTreeItemFromRecord(int vecIndex)
+{
+    if (protocolLogTree_ == nullptr || vecIndex < 0 || vecIndex >= protocolRecords_.size()) {
+        return;
+    }
+    const ProtocolPacketRecord& r = protocolRecords_[vecIndex];
+    for (int i = 0; i < protocolLogTree_->topLevelItemCount(); ++i) {
+        QTreeWidgetItem* it = protocolLogTree_->topLevelItem(i);
+        if (it->data(0, kProtoVecRole).toInt() != vecIndex) {
+            continue;
+        }
+        it->setData(0, Qt::UserRole, static_cast<int>(r.kind));
+        it->setText(3, r.kindLabel);
+        const QColor fgType = protocolKindColor(r.kind);
+        const QColor dirFg = r.fromClient ? QColor(0x5e, 0xea, 0xd4) : QColor(0xfc, 0xa5, 0xa5);
+        it->setForeground(0, QBrush(fgType));
+        it->setForeground(2, QBrush(dirFg));
+        it->setForeground(3, QBrush(fgType));
+        break;
+    }
+}
+
+void MainWindow::applyPacketKindOverride(int vecIndex, const QString& label)
+{
+    if (vecIndex < 0 || vecIndex >= protocolRecords_.size()) {
+        return;
+    }
+    ProtocolPacketRecord& r = protocolRecords_[vecIndex];
+    packetTypeOverrides_.setLabelForPayload(r.rawPayload, label);
+    QString err;
+    if (!packetTypeOverrides_.save(&err)) {
+        QMessageBox::warning(this, QStringLiteral("Guardar tipo"),
+                             QStringLiteral("No se pudo guardar packet_type_overrides.json:\n%1").arg(err));
+        return;
+    }
+    const PacketKind mapped = packetKindFromDisplayLabel(label);
+    r.kind = (mapped != PacketKind::Unknown) ? mapped : PacketKind::DataGeneric;
+    r.kindLabel = label;
+    syncProtocolTreeItemFromRecord(vecIndex);
+    refreshProtocolDetailFromSelection();
+    applyProtocolLogFilters();
+    statusBar()->showMessage(QStringLiteral("Tipo de paquete: %1").arg(label), 4000);
+}
+
+void MainWindow::clearPacketKindOverride(int vecIndex)
+{
+    if (vecIndex < 0 || vecIndex >= protocolRecords_.size()) {
+        return;
+    }
+    ProtocolPacketRecord& r = protocolRecords_[vecIndex];
+    packetTypeOverrides_.removeFingerprint(r.rawPayload);
+    QString err;
+    if (!packetTypeOverrides_.save(&err)) {
+        QMessageBox::warning(this, QStringLiteral("Guardar tipo"),
+                             QStringLiteral("No se pudo guardar packet_type_overrides.json:\n%1").arg(err));
+        return;
+    }
+    const ProtocolPacketRecord rebuilt =
+        buildRecordFromPayload(r.index, r.fromClient, r.rawPayload, &packetTypeOverrides_);
+    r.kind = rebuilt.kind;
+    r.kindLabel = rebuilt.kindLabel;
+    syncProtocolTreeItemFromRecord(vecIndex);
+    refreshProtocolDetailFromSelection();
+    applyProtocolLogFilters();
+    statusBar()->showMessage(QStringLiteral("Corrección manual eliminada; tipo automático aplicado."), 4000);
+}
+
 void MainWindow::refreshProtocolDetailFromSelection()
 {
     if (protocolDetailText_ == nullptr || protocolLogTree_ == nullptr) {
@@ -2981,7 +3122,21 @@ void MainWindow::onProtocolLogContextMenu(const QPoint& pos)
     }
     protocolLogTree_->setCurrentItem(it);
     refreshProtocolDetailFromSelection();
+    bool okIdx = false;
+    const int vix = it->data(0, kProtoVecRole).toInt(&okIdx);
+
     QMenu menu(this);
+    if (okIdx && vix >= 0 && vix < protocolRecords_.size()) {
+        QMenu* typeMenu = menu.addMenu(QStringLiteral("✏ Corregir tipo de paquete"));
+        const QStringList labels = standardPacketKindLabels();
+        for (const QString& lab : labels) {
+            typeMenu->addAction(lab, this, [this, vix, lab]() { applyPacketKindOverride(vix, lab); });
+        }
+        typeMenu->addSeparator();
+        typeMenu->addAction(QStringLiteral("Quitar corrección manual (volver a detección)"), this,
+                            [this, vix]() { clearPacketKindOverride(vix); });
+        menu.addSeparator();
+    }
     menu.addAction(QStringLiteral("Exportar selección (%1) a TXT…")
                        .arg(protocolLogTree_->selectedItems().size()),
                    this, &MainWindow::exportSelectedPackages);
@@ -3330,7 +3485,8 @@ void MainWindow::showImportLogPreviewDialog(const QString& path)
         prv->setFont(fn);
     }
     if (!chunks.isEmpty()) {
-        ProtocolPacketRecord previewRec = buildRecordFromPayload(1, chunks[0].first, chunks[0].second);
+        ProtocolPacketRecord previewRec =
+            buildRecordFromPayload(1, chunks[0].first, chunks[0].second, &packetTypeOverrides_);
         prv->setPlainText(
             buildPacketAnalysisText(previewRec, mergedAliasRulesForAnalysis(), 128, &idDatabase_.customNotesById()));
     } else {
@@ -3395,6 +3551,24 @@ void MainWindow::applyProtocolLogFilters()
             okKind = (k == PacketKind::IeeHarvest);
         } else if (fil == 10) {
             okKind = (k == PacketKind::IdrItemReceived);
+        } else if (fil == 11) {
+            okKind = (k == PacketKind::IdyItemDisplayed);
+        } else if (fil == 12) {
+            okKind = (k == PacketKind::IdwItemVanished);
+        } else if (fil == 13) {
+            okKind = (k == PacketKind::IsuClientSync);
+        } else if (fil == 14) {
+            okKind = (k == PacketKind::IrkSyncResponse);
+        } else if (fil == 15) {
+            okKind = (k == PacketKind::IspSync);
+        } else if (fil == 16) {
+            okKind = (k == PacketKind::ItvInteraction);
+        } else if (fil == 17) {
+            okKind = (k == PacketKind::KjCompression);
+        } else if (fil == 18) {
+            okKind = (k == PacketKind::JmwMonsterCmd);
+        } else if (fil == 19) {
+            okKind = (k == PacketKind::JrrCommandResponse);
         }
         QString rowText;
         for (int c = 0; c < protocolLogTree_->columnCount(); ++c) {
@@ -3489,7 +3663,7 @@ void MainWindow::updateResourcesFromIsoPayload(const QByteArray& payload)
 void MainWindow::onProtocolPayloadCaptured(bool fromClient, const QByteArray& payload)
 {
     ++protocolPacketSeq_;
-    ProtocolPacketRecord r = buildRecordFromPayload(protocolPacketSeq_, fromClient, payload);
+    ProtocolPacketRecord r = buildRecordFromPayload(protocolPacketSeq_, fromClient, payload, &packetTypeOverrides_);
     protocolRecords_.push_back(r);
     appendProtocolTreeItem(r, protocolRecords_.size() - 1);
     applyProtocolLogFilters();

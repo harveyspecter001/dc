@@ -10,6 +10,7 @@
 #include "IdDatabase.h"
 #include "IriCardinalEmulator.h"
 #include "ProcessEnumerator.h"
+#include "PacketTypeOverrides.h"
 #include "ProtocolLogAnalyzer.h"
 
 #include <QtGlobal>
@@ -232,6 +233,7 @@ private:
     QFrame* protocolDropZone_ = nullptr;
 
     IdDatabase idDatabase_;
+    PacketTypeOverrides packetTypeOverrides_;
     QByteArray harvestTemplatePayload_;
     bool harvestAwaitingIdr_ = false;
     QTimer* harvestWatchTimer_ = nullptr;
@@ -274,6 +276,9 @@ private:
     [[nodiscard]] QString harvestTemplateBinPath() const;
     void setupLibraryTab(QWidget* tab);
     void appendProtocolTreeItem(const ProtocolPacketRecord& r, int vectorIndex);
+    void syncProtocolTreeItemFromRecord(int vecIndex);
+    void applyPacketKindOverride(int vecIndex, const QString& label);
+    void clearPacketKindOverride(int vecIndex);
     void refreshProtocolDetailFromSelection();
     void saveSelectedPacketAsTemplate(const QString& cardinalEs);
     void exportSelectedPacketAsJsonOrTxt();

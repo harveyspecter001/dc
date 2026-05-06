@@ -1,6 +1,8 @@
 #include "ProtocolLogAnalyzer.h"
+#include "PacketTypeOverrides.h"
 
 #include <QHash>
+#include <QStringList>
 #include <QRegularExpression>
 #include <QSet>
 #include <QStringList>
@@ -74,12 +76,12 @@ PacketKind classifyPacketKind(const QByteArray& payload)
     if (payload.isEmpty()) {
         return PacketKind::Unknown;
     }
-    // Orden: subcadenas más específicas primero donde aplique
+    // Orden: rutas type.ankama.com/* (cada token de ruta es distinto: /iri, /irl, /iso, …)
     if (payload.contains(QByteArrayLiteral("type.ankama.com/iri"))) {
         return PacketKind::IriMovement;
     }
-    if (payload.contains(QByteArrayLiteral("type.ankama.com/irl"))) {
-        return PacketKind::IrlList;
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/iee"))) {
+        return PacketKind::IeeHarvest;
     }
     if (payload.contains(QByteArrayLiteral("type.ankama.com/iso"))) {
         return PacketKind::IsoResources;
@@ -87,17 +89,44 @@ PacketKind classifyPacketKind(const QByteArray& payload)
     if (payload.contains(QByteArrayLiteral("type.ankama.com/irx"))) {
         return PacketKind::IrxMonsters;
     }
-    if (payload.contains(QByteArrayLiteral("type.ankama.com/isl"))) {
-        return PacketKind::IslEntities;
-    }
-    if (payload.contains(QByteArrayLiteral("type.ankama.com/iee"))) {
-        return PacketKind::IeeHarvest;
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/irl"))) {
+        return PacketKind::IrlList;
     }
     if (payload.contains(QByteArrayLiteral("type.ankama.com/idr"))) {
         return PacketKind::IdrItemReceived;
     }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/idy"))) {
+        return PacketKind::IdyItemDisplayed;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/idw"))) {
+        return PacketKind::IdwItemVanished;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/isl"))) {
+        return PacketKind::IslEntities;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/isu"))) {
+        return PacketKind::IsuClientSync;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/irk"))) {
+        return PacketKind::IrkSyncResponse;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/isp"))) {
+        return PacketKind::IspSync;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/itv"))) {
+        return PacketKind::ItvInteraction;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/kj"))) {
+        return PacketKind::KjCompression;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/jmw"))) {
+        return PacketKind::JmwMonsterCmd;
+    }
     if (payload.contains(QByteArrayLiteral("type.ankama.com/jrt"))) {
         return PacketKind::CommandData;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/jrr"))) {
+        return PacketKind::JrrCommandResponse;
     }
     return PacketKind::DataGeneric;
 }
@@ -114,18 +143,102 @@ QString packetKindDisplayString(PacketKind k)
     case PacketKind::IrxMonsters:
         return QStringLiteral("IRX (MONSTRUOS)");
     case PacketKind::IslEntities:
-        return QStringLiteral("ISL (LISTA)");
+        return QStringLiteral("ISL (ENTIDADES)");
     case PacketKind::IeeHarvest:
-        return QStringLiteral("IEE (RECOLECTAR)");
+        return QStringLiteral("IEE (RECOLECCIÓN)");
     case PacketKind::IdrItemReceived:
         return QStringLiteral("IDR (ITEM RECIBIDO)");
+    case PacketKind::IdyItemDisplayed:
+        return QStringLiteral("IDY (ITEM DESPLEGADO)");
+    case PacketKind::IdwItemVanished:
+        return QStringLiteral("IDW (ITEM DESAPARECE)");
+    case PacketKind::IsuClientSync:
+        return QStringLiteral("ISU (SYNC CLIENTE)");
+    case PacketKind::IrkSyncResponse:
+        return QStringLiteral("IRK (SYNC RESPUESTA)");
+    case PacketKind::KjCompression:
+        return QStringLiteral("KJ (COMPRESIÓN?)");
+    case PacketKind::JmwMonsterCmd:
+        return QStringLiteral("JMW (COMANDO MONSTRUOS)");
     case PacketKind::CommandData:
-        return QStringLiteral("COMANDO / jrt");
+        return QStringLiteral("JRT (COMANDO)");
+    case PacketKind::JrrCommandResponse:
+        return QStringLiteral("JRR (RESPUESTA COMANDO)");
+    case PacketKind::IspSync:
+        return QStringLiteral("ISP (SINCRONIZACIÓN?)");
+    case PacketKind::ItvInteraction:
+        return QStringLiteral("ITV (INTERACCIÓN?)");
     case PacketKind::DataGeneric:
         return QStringLiteral("DATOS");
     default:
         return QStringLiteral("OTRO");
     }
+}
+
+PacketKind packetKindFromDisplayLabel(const QString& label)
+{
+    const QString t = label.trimmed();
+    static const QVector<QPair<QString, PacketKind>> map = {
+        {QStringLiteral("IRI (MOVIMIENTO)"), PacketKind::IriMovement},
+        {QStringLiteral("IRL (LISTA)"), PacketKind::IrlList},
+        {QStringLiteral("ISO (RECURSOS)"), PacketKind::IsoResources},
+        {QStringLiteral("IRX (MONSTRUOS)"), PacketKind::IrxMonsters},
+        {QStringLiteral("ISL (ENTIDADES)"), PacketKind::IslEntities},
+        {QStringLiteral("ISL (LISTA)"), PacketKind::IslEntities},
+        {QStringLiteral("IEE (RECOLECCIÓN)"), PacketKind::IeeHarvest},
+        {QStringLiteral("IEE (RECOLECTAR)"), PacketKind::IeeHarvest},
+        {QStringLiteral("IDR (ITEM RECIBIDO)"), PacketKind::IdrItemReceived},
+        {QStringLiteral("IDY (ITEM DESPLEGADO)"), PacketKind::IdyItemDisplayed},
+        {QStringLiteral("IDW (ITEM DESAPARECE)"), PacketKind::IdwItemVanished},
+        {QStringLiteral("ISU (SYNC CLIENTE)"), PacketKind::IsuClientSync},
+        {QStringLiteral("IRK (SYNC RESPUESTA)"), PacketKind::IrkSyncResponse},
+        {QStringLiteral("KJ (COMPRESIÓN?)"), PacketKind::KjCompression},
+        {QStringLiteral("JMW (COMANDO MONSTRUOS)"), PacketKind::JmwMonsterCmd},
+        {QStringLiteral("JRT (COMANDO)"), PacketKind::CommandData},
+        {QStringLiteral("COMANDO / jrt"), PacketKind::CommandData},
+        {QStringLiteral("JRR (RESPUESTA COMANDO)"), PacketKind::JrrCommandResponse},
+        {QStringLiteral("ISP (SINCRONIZACIÓN?)"), PacketKind::IspSync},
+        {QStringLiteral("ITV (INTERACCIÓN?)"), PacketKind::ItvInteraction},
+        {QStringLiteral("DATOS"), PacketKind::DataGeneric},
+        {QStringLiteral("OTRO"), PacketKind::Unknown},
+    };
+    for (const auto& p : map) {
+        if (t.compare(p.first, Qt::CaseInsensitive) == 0) {
+            return p.second;
+        }
+    }
+    return PacketKind::Unknown;
+}
+
+QStringList standardPacketKindLabels()
+{
+    QStringList out;
+    out.reserve(32);
+    const QList<PacketKind> kinds = {
+        PacketKind::IriMovement,
+        PacketKind::IeeHarvest,
+        PacketKind::IsoResources,
+        PacketKind::IrxMonsters,
+        PacketKind::IrlList,
+        PacketKind::IdrItemReceived,
+        PacketKind::IdyItemDisplayed,
+        PacketKind::IdwItemVanished,
+        PacketKind::IslEntities,
+        PacketKind::IsuClientSync,
+        PacketKind::IrkSyncResponse,
+        PacketKind::KjCompression,
+        PacketKind::JmwMonsterCmd,
+        PacketKind::CommandData,
+        PacketKind::JrrCommandResponse,
+        PacketKind::IspSync,
+        PacketKind::ItvInteraction,
+        PacketKind::DataGeneric,
+        PacketKind::Unknown,
+    };
+    for (PacketKind k : kinds) {
+        out.push_back(packetKindDisplayString(k));
+    }
+    return out;
 }
 
 QVector<IdRangeRule> defaultBuiltinIdRules()
@@ -519,16 +632,28 @@ QString buildPacketAnalysisText(const ProtocolPacketRecord& rec, const QVector<I
     return t;
 }
 
-ProtocolPacketRecord buildRecordFromPayload(int packetIndex, bool fromClient, const QByteArray& payload)
+ProtocolPacketRecord buildRecordFromPayload(int packetIndex, bool fromClient, const QByteArray& payload,
+                                            const PacketTypeOverrides* overrides)
 {
     ProtocolPacketRecord r;
     r.index = packetIndex;
     r.received = QDateTime::currentDateTime();
     r.fromClient = fromClient;
     r.byteSize = payload.size();
-    r.kind = classifyPacketKind(payload);
-    r.kindLabel = packetKindDisplayString(r.kind);
     r.rawPayload = payload;
+
+    QString ovLabel;
+    if (overrides != nullptr) {
+        ovLabel = overrides->labelForPayload(payload);
+    }
+    if (!ovLabel.isEmpty()) {
+        const PacketKind mapped = packetKindFromDisplayLabel(ovLabel);
+        r.kind = (mapped != PacketKind::Unknown) ? mapped : PacketKind::DataGeneric;
+        r.kindLabel = ovLabel;
+    } else {
+        r.kind = classifyPacketKind(payload);
+        r.kindLabel = packetKindDisplayString(r.kind);
+    }
     extractAnkamaTypeUrls(payload, &r.stringsFound);
     if (!r.stringsFound.isEmpty()) {
         r.primaryUrl = r.stringsFound.first();
