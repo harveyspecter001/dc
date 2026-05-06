@@ -37,6 +37,9 @@
 #include <QMessageBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QTextBrowser>
+#include <QTextEdit>
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QPushButton>
@@ -468,17 +471,17 @@ MainWindow::MainWindow(QWidget* parent)
             "<b>Logs de protocolo</b> — columna seleccionada abre detalle HEX; plantillas ☆iri solo desde paquetes IRI.")));
         auto* fl = new QHBoxLayout;
         protocolKindFilter_ = new QComboBox;
-        protocolKindFilter_->addItem(QStringLiteral("Mostrar: todos"));
-        protocolKindFilter_->addItem(QStringLiteral("Solo IRI"));
-        protocolKindFilter_->addItem(QStringLiteral("Solo IRL"));
-        protocolKindFilter_->addItem(QStringLiteral("Solo ISO"));
-        protocolKindFilter_->addItem(QStringLiteral("Solo IRX"));
-        protocolKindFilter_->addItem(QStringLiteral("Solo ISL"));
-        protocolKindFilter_->addItem(QStringLiteral("Solo COMANDO/jrt"));
-        protocolKindFilter_->addItem(QStringLiteral("Solo DATOS"));
-        protocolKindFilter_->addItem(QStringLiteral("Solo OTRO"));
-        protocolKindFilter_->addItem(QStringLiteral("Solo IEE (recolectar)"));
-        protocolKindFilter_->addItem(QStringLiteral("Solo IDR (ítem recibido)"));
+        protocolKindFilter_->addItem(QStringLiteral("Todos"));
+        protocolKindFilter_->addItem(QStringLiteral("IRI (Movimiento)"));
+        protocolKindFilter_->addItem(QStringLiteral("IRL (Lista)"));
+        protocolKindFilter_->addItem(QStringLiteral("ISO (Recursos)"));
+        protocolKindFilter_->addItem(QStringLiteral("IRX (Monstruos)"));
+        protocolKindFilter_->addItem(QStringLiteral("ISL (entidades)"));
+        protocolKindFilter_->addItem(QStringLiteral("COMANDO / jrt"));
+        protocolKindFilter_->addItem(QStringLiteral("DATOS"));
+        protocolKindFilter_->addItem(QStringLiteral("Otro / desconocido"));
+        protocolKindFilter_->addItem(QStringLiteral("IEE (Recolección)"));
+        protocolKindFilter_->addItem(QStringLiteral("IDR (ítem recibido)"));
         protocolKindFilter_->setToolTip(QStringLiteral("Filtra por tipo detectado en el payload."));
         connect(protocolKindFilter_, &QComboBox::currentIndexChanged, this, &MainWindow::onProtocolFilterChanged);
         fl->addWidget(protocolKindFilter_);
@@ -488,6 +491,11 @@ MainWindow::MainWindow(QWidget* parent)
             "Coincide en todo el contenido de la fila (incl. vista previa de IDs y URL principal)."));
         connect(protocolSearchEdit_, &QLineEdit::textChanged, this, &MainWindow::onProtocolFilterChanged);
         fl->addWidget(protocolSearchEdit_, 1);
+        protocolLogAutoScrollChk_ = new QCheckBox(QStringLiteral("Auto-scroll a último paquete"));
+        protocolLogAutoScrollChk_->setChecked(true);
+        protocolLogAutoScrollChk_->setToolTip(
+            QStringLiteral("Si está activo, al llegar un paquete nuevo la lista baja al final."));
+        fl->addWidget(protocolLogAutoScrollChk_);
         importExportedLogBtn_ = new QPushButton(QStringLiteral("Importar .txt…"));
         importExportedLogBtn_->setToolTip(QStringLiteral("Vista previa del primer paquete y recuento antes de cargar."));
         connect(importExportedLogBtn_, &QPushButton::clicked, this, &MainWindow::onImportExportedLogClicked);
@@ -533,13 +541,16 @@ MainWindow::MainWindow(QWidget* parent)
         auto* detailBox = new QWidget;
         auto* dv = new QVBoxLayout(detailBox);
         dv->setContentsMargins(0, 8, 0, 0);
-        dv->addWidget(new QLabel(QStringLiteral("<b>Detalle del paquete (Wireshark-ish)</b>")));
-        protocolDetailText_ = new QPlainTextEdit;
+        dv->addWidget(new QLabel(QStringLiteral("<b>Detalle del paquete</b> — HEX completo, strings, IDs y análisis")));
+        protocolDetailText_ = new QTextBrowser;
         protocolDetailText_->setReadOnly(true);
+        protocolDetailText_->setOpenExternalLinks(false);
         protocolDetailText_->setMinimumHeight(220);
+        protocolDetailText_->setStyleSheet(
+            QStringLiteral("QTextBrowser { background-color: #111827; color: #e5e7eb; }"));
         {
             auto df = protocolDetailText_->font();
-            df.setFamily(QStringLiteral("Consolas"));
+            df.setFamily(QStringLiteral("Segoe UI"));
             protocolDetailText_->setFont(df);
         }
         dv->addWidget(protocolDetailText_);
@@ -2466,28 +2477,162 @@ void MainWindow::refreshConnectionMonitor()
 
 QColor MainWindow::protocolKindColor(PacketKind k) const
 {
+    // Colores por familia de paquete (tabla y detalle)
     switch (k) {
     case PacketKind::IriMovement:
-        return QColor(0x4a, 0xde, 0x80);
-    case PacketKind::IrlList:
-        return QColor(0x60, 0xa5, 0xfa);
-    case PacketKind::IsoResources:
-        return QColor(0xfb, 0xbf, 0x24);
-    case PacketKind::IrxMonsters:
-        return QColor(0xf8, 0x71, 0x71);
-    case PacketKind::IslEntities:
-        return QColor(0xc4, 0xb5, 0xfd);
+        return Qt::green;
     case PacketKind::IeeHarvest:
-        return QColor(0xfb, 0x92, 0x3c);
+        return Qt::darkGreen;
+    case PacketKind::IsoResources:
+        return QColor(255, 200, 100);
+    case PacketKind::IrxMonsters:
+        return Qt::red;
+    case PacketKind::IrlList:
+        return Qt::cyan;
     case PacketKind::IdrItemReceived:
-        return QColor(0x86, 0xef, 0xac);
+        return QColor(100, 255, 100);
+    case PacketKind::IslEntities:
+        return QColor(200, 180, 255);
     case PacketKind::CommandData:
-        return QColor(0xf8, 0x71, 0x71);
+        return QColor(255, 140, 90);
     case PacketKind::DataGeneric:
-        return QColor(0x9c, 0xa3, 0xaf);
+        return QColor(220, 220, 220);
     default:
-        return QColor(0xd4, 0xd4, 0xd4);
+        return Qt::white;
     }
+}
+
+QString MainWindow::packetTypeEmoji(PacketKind k) const
+{
+    switch (k) {
+    case PacketKind::IriMovement:
+        return QStringLiteral("🚶");
+    case PacketKind::IeeHarvest:
+        return QStringLiteral("🌾");
+    case PacketKind::IsoResources:
+        return QStringLiteral("📦");
+    case PacketKind::IrxMonsters:
+        return QStringLiteral("👾");
+    case PacketKind::IrlList:
+        return QStringLiteral("📋");
+    case PacketKind::IdrItemReceived:
+        return QStringLiteral("✅");
+    case PacketKind::IslEntities:
+        return QStringLiteral("📑");
+    case PacketKind::CommandData:
+        return QStringLiteral("⚙");
+    case PacketKind::DataGeneric:
+        return QStringLiteral("📄");
+    default:
+        return QStringLiteral("❔");
+    }
+}
+
+QString MainWindow::buildProtocolPacketDetailHtml(const ProtocolPacketRecord& rec) const
+{
+    const QVector<IdRangeRule> rules = mergedAliasRulesForAnalysis();
+    const QHash<quint64, QString>* notes = &idDatabase_.customNotesById();
+    const QString emoji = packetTypeEmoji(rec.kind);
+    const QColor tc = protocolKindColor(rec.kind);
+
+    QString html;
+    html += QStringLiteral("<html><body style=\"color:#e5e7eb;background:#111827;\">");
+    html += QStringLiteral("<h3 style=\"margin:0;\">%1 Paquete #%2</h3>")
+                .arg(emoji)
+                .arg(rec.index);
+    html += QStringLiteral("<p style=\"margin:6px 0;color:#94a3b8;\">%1 · %2 · %3 bytes · "
+                           "<span style=\"color:%4\"><b>%5</b></span></p>")
+                .arg(rec.received.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")),
+                     rec.fromClient ? QStringLiteral("Cliente→Servidor") : QStringLiteral("Servidor→Cliente"),
+                     QString::number(rec.byteSize),
+                     tc.name(),
+                     rec.kindLabel.toHtmlEscaped());
+
+    html += QStringLiteral("<p><b style=\"color:#fbbf24;\">Análisis</b><br>");
+    switch (rec.kind) {
+    case PacketKind::IriMovement:
+        html += QStringLiteral("• Movimiento del personaje (IRI)<br>");
+        break;
+    case PacketKind::IeeHarvest:
+        html += QStringLiteral("• Recolección de recurso (IEE)<br>");
+        break;
+    case PacketKind::IsoResources:
+        html += QStringLiteral("• Información de recursos en el mapa (ISO)<br>");
+        break;
+    case PacketKind::IrxMonsters:
+        html += QStringLiteral("• Lista / datos de monstruos en el mapa (IRX)<br>");
+        break;
+    case PacketKind::IrlList:
+        html += QStringLiteral("• Lista relacionada (IRL)<br>");
+        break;
+    case PacketKind::IdrItemReceived:
+        html += QStringLiteral("• Ítem recibido en inventario (IDR)<br>");
+        break;
+    case PacketKind::IslEntities:
+        html += QStringLiteral("• Entidades / ISL<br>");
+        break;
+    case PacketKind::CommandData:
+        html += QStringLiteral("• Comando / jrt<br>");
+        break;
+    case PacketKind::DataGeneric:
+        html += QStringLiteral("• Datos genéricos sin URL Ankama conocida<br>");
+        break;
+    default:
+        html += QStringLiteral("• Tipo no clasificado automáticamente<br>");
+        break;
+    }
+    html += QStringLiteral("</p>");
+
+    if (!rec.stringsFound.isEmpty()) {
+        html += QStringLiteral("<p><b style=\"color:#93c5fd;\">Strings</b><br>");
+        for (const QString& s : rec.stringsFound) {
+            html += QStringLiteral("«%1»<br>").arg(s.toHtmlEscaped());
+        }
+        html += QStringLiteral("</p>");
+    }
+
+    html += QStringLiteral("<p><b style=\"color:#86efac;\">IDs / varints</b> (hasta 40 con alias)<br>");
+    const int idLim = qMin(40, rec.numericIds.size());
+    for (int i = 0; i < idLim; ++i) {
+        const quint64 id = rec.numericIds.at(i);
+        QString cat;
+        const QString al = resolveIdWithRules(id, rules, &cat);
+        QString line = QStringLiteral("[%1] %2").arg(i).arg(id);
+        if (!al.isEmpty()) {
+            line += QStringLiteral(" → %1").arg(al.toHtmlEscaped());
+            if (!cat.isEmpty()) {
+                line += QStringLiteral(" (%1)").arg(cat.toHtmlEscaped());
+            }
+        }
+        const QString note = notes->value(id);
+        if (!note.isEmpty()) {
+            line += QStringLiteral(" — nota: %1").arg(note.toHtmlEscaped());
+        }
+        html += line + QStringLiteral("<br>");
+    }
+    if (rec.numericIds.size() > idLim) {
+        html += QStringLiteral("… +%1 más<br>").arg(rec.numericIds.size() - idLim);
+    }
+    html += QStringLiteral("</p>");
+
+    constexpr int kMaxHexUiBytes = 512 * 1024;
+    const int payloadSz = rec.rawPayload.size();
+    const bool truncPanel = payloadSz > kMaxHexUiBytes;
+    const int hexTake = truncPanel ? kMaxHexUiBytes : payloadSz;
+    const QString hexDump = formatHexDumpWireshark(rec.rawPayload, hexTake);
+    const QString truncNote =
+        truncPanel ? QStringLiteral(" — en panel solo los primeros %1 B; exportar selección para volcado completo")
+                         .arg(kMaxHexUiBytes)
+                   : QString();
+    html += QStringLiteral("<p><b style=\"color:#fca5a5;\">HEX</b> (%1 bytes%2)</p>"
+                           "<pre style=\"white-space:pre-wrap;font-family:Consolas,monospace;font-size:10pt;"
+                           "color:#c7d2fe;\">%3</pre>")
+                .arg(payloadSz)
+                .arg(truncNote)
+                .arg(QString(hexDump).toHtmlEscaped());
+
+    html += QStringLiteral("</body></html>");
+    return html;
 }
 
 QVector<IdRangeRule> MainWindow::parsedUserIdRulesFromUi() const
@@ -2590,7 +2735,7 @@ void MainWindow::appendProtocolTreeItem(const ProtocolPacketRecord& r, int vecto
 
     const QColor fgType = protocolKindColor(r.kind);
     const QColor dirFg = r.fromClient ? QColor(0x5e, 0xea, 0xd4) : QColor(0xfc, 0xa5, 0xa5);
-    it->setForeground(0, QBrush(QColor(0xe5, 0xe7, 0xeb)));
+    it->setForeground(0, QBrush(fgType));
     it->setForeground(1, QBrush(QColor(0xe5, 0xe7, 0xeb)));
     it->setForeground(2, QBrush(dirFg));
     it->setForeground(3, QBrush(fgType));
@@ -2600,6 +2745,9 @@ void MainWindow::appendProtocolTreeItem(const ProtocolPacketRecord& r, int vecto
 
     protocolLogTree_->resizeColumnToContents(0);
     protocolLogTree_->resizeColumnToContents(4);
+    if (protocolLogAutoScrollChk_ != nullptr && protocolLogAutoScrollChk_->isChecked()) {
+        protocolLogTree_->scrollToItem(it, QAbstractItemView::PositionAtBottom);
+    }
 }
 
 void MainWindow::refreshProtocolDetailFromSelection()
@@ -2619,9 +2767,7 @@ void MainWindow::refreshProtocolDetailFromSelection()
         return;
     }
     const ProtocolPacketRecord& rec = protocolRecords_[vix];
-    const QString body = buildPacketAnalysisText(rec, mergedAliasRulesForAnalysis(), 256,
-                                                 &idDatabase_.customNotesById());
-    protocolDetailText_->setPlainText(body);
+    protocolDetailText_->setHtml(buildProtocolPacketDetailHtml(rec));
 }
 
 void MainWindow::onProtocolLogCurrentItemChanged(QTreeWidgetItem* current, QTreeWidgetItem* /*previous*/)
@@ -2645,6 +2791,8 @@ void MainWindow::onProtocolLogContextMenu(const QPoint& pos)
     menu.addAction(QStringLiteral("Exportar selección (%1) a TXT…")
                        .arg(protocolLogTree_->selectedItems().size()),
                    this, &MainWindow::exportSelectedPackages);
+    menu.addAction(QStringLiteral("Guardar selección con nombre y nota…"), this,
+                   &MainWindow::onExportSelectedWithNote);
     menu.addSeparator();
     menu.addAction(QStringLiteral("Exportar paquete actual a JSON / TXT…"), this,
                    &MainWindow::exportSelectedPacketAsJsonOrTxt);
@@ -2718,6 +2866,110 @@ void MainWindow::exportSelectedPackages()
     }
     f.close();
     statusBar()->showMessage(QStringLiteral("Exportados %1 paquetes → %2").arg(items.size()).arg(fileName), 8000);
+}
+
+void MainWindow::onExportSelectedWithNote()
+{
+    if (protocolLogTree_ == nullptr) {
+        return;
+    }
+    QList<QTreeWidgetItem*> selected = protocolLogTree_->selectedItems();
+    if (selected.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Sin selección"), QStringLiteral("No hay paquetes seleccionados."));
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Guardar selección"));
+    auto* form = new QFormLayout(&dlg);
+    auto* nameEdit = new QLineEdit(&dlg);
+    nameEdit->setPlaceholderText(QStringLiteral("nombre opcional"));
+    auto* noteEdit = new QTextEdit(&dlg);
+    noteEdit->setPlaceholderText(QStringLiteral("Nota / descripción…"));
+    noteEdit->setMinimumHeight(100);
+    form->addRow(QStringLiteral("Nombre del log:"), nameEdit);
+    form->addRow(QStringLiteral("Nota / descripción:"), noteEdit);
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    form->addRow(bb);
+    QObject::connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    QObject::connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    if (dlg.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    QString baseName = nameEdit->text().trimmed();
+    if (baseName.isEmpty()) {
+        baseName = QStringLiteral("log_%1").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_hhmmss")));
+    }
+    for (QChar& c : baseName) {
+        if (c == QLatin1Char('/') || c == QLatin1Char('\\') || c == QLatin1Char(':') || c == QLatin1Char('*')
+            || c == QLatin1Char('?') || c == QLatin1Char('"') || c == QLatin1Char('<') || c == QLatin1Char('>')
+            || c == QLatin1Char('|')) {
+            c = QLatin1Char('_');
+        }
+    }
+
+    const QString exportDir =
+        QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("exported_logs"));
+    QDir().mkpath(exportDir);
+    const QString fileName = QDir(exportDir).filePath(baseName + QStringLiteral(".txt"));
+
+    struct ItemRec {
+        int index = 0;
+        int vecIndex = -1;
+    };
+    QVector<ItemRec> items;
+    items.reserve(selected.size());
+    for (QTreeWidgetItem* it : selected) {
+        if (!it) {
+            continue;
+        }
+        bool ok = false;
+        const int vix = it->data(0, kProtoVecRole).toInt(&ok);
+        if (!ok || vix < 0 || vix >= protocolRecords_.size()) {
+            continue;
+        }
+        const int idx = protocolRecords_[vix].index;
+        items.push_back(ItemRec{idx, vix});
+    }
+    if (items.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Exportar"), QStringLiteral("La selección no contiene registros válidos."));
+        return;
+    }
+    std::sort(items.begin(), items.end(), [](const ItemRec& a, const ItemRec& b) {
+        if (a.index != b.index) {
+            return a.index < b.index;
+        }
+        return a.vecIndex < b.vecIndex;
+    });
+
+    QFile f(fileName);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        QMessageBox::warning(this, QStringLiteral("Exportar"),
+                             QStringLiteral("No se pudo escribir:\n%1").arg(fileName));
+        return;
+    }
+
+    QTextStream out(&f);
+    out << QStringLiteral("=== LOG EXPORTADO ===\n");
+    out << QStringLiteral("Nombre: ") << baseName << QLatin1Char('\n');
+    out << QStringLiteral("Fecha: ")
+        << QDateTime::currentDateTime().toString(Qt::ISODateWithMs) << QLatin1Char('\n');
+    out << QStringLiteral("Nota: ") << noteEdit->toPlainText() << QLatin1Char('\n');
+    out << QStringLiteral("Paquetes: ") << items.size() << QLatin1Char('\n');
+    out << QStringLiteral("===================\n\n");
+
+    const QVector<IdRangeRule> rules = mergedAliasRulesForAnalysis();
+    const auto* notes = &idDatabase_.customNotesById();
+    for (const ItemRec& ir : items) {
+        const ProtocolPacketRecord& rec = protocolRecords_[ir.vecIndex];
+        out << QStringLiteral("========================================\n");
+        out << QStringLiteral("EXPORT paquete #") << rec.index << QLatin1Char('\n');
+        out << buildPacketAnalysisText(rec, rules, rec.rawPayload.size(), notes);
+        out << QLatin1Char('\n');
+    }
+    f.close();
+    statusBar()->showMessage(QStringLiteral("Log guardado: %1").arg(QDir::toNativeSeparators(fileName)), 10000);
 }
 
 void MainWindow::onIdAliasRulesChanged()

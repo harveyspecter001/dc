@@ -30,6 +30,7 @@ class QTreeWidget;
 class QTreeWidgetItem;
 class QComboBox;
 class QPlainTextEdit;
+class QTextBrowser;
 class QSplitter;
 
 class DiagnosticsLogWindow;
@@ -85,6 +86,7 @@ private slots:
     void onProtocolFilterChanged();
     void onProtocolLogCurrentItemChanged(QTreeWidgetItem* current, QTreeWidgetItem* previous);
     void onProtocolLogContextMenu(const QPoint& pos);
+    void onExportSelectedWithNote();
     void onIdAliasRulesChanged();
     void onEditIdsClicked();
     void onHarvestWaitTimeout();
@@ -203,11 +205,12 @@ private:
     QLabel* monstersMapLbl_ = nullptr;
     QTreeWidget* protocolLogTree_ = nullptr;
     QComboBox* protocolKindFilter_ = nullptr;
+    QCheckBox* protocolLogAutoScrollChk_ = nullptr;
     QLineEdit* protocolSearchEdit_ = nullptr;
     QPushButton* clearProtocolLogBtn_ = nullptr;
     QPushButton* importExportedLogBtn_ = nullptr;
     QSplitter* protocolLogSplitter_ = nullptr;
-    QPlainTextEdit* protocolDetailText_ = nullptr;
+    QTextBrowser* protocolDetailText_ = nullptr;
     QPlainTextEdit* idAliasRulesEdit_ = nullptr;
     QPushButton* saveTmplN_btn_ = nullptr;
     QPushButton* saveTmplS_btn_ = nullptr;
@@ -251,6 +254,8 @@ private:
     void runUpstreamTcpProbe(const QString& host, quint16 port);
 
     [[nodiscard]] QColor protocolKindColor(PacketKind k) const;
+    [[nodiscard]] QString packetTypeEmoji(PacketKind k) const;
+    [[nodiscard]] QString buildProtocolPacketDetailHtml(const ProtocolPacketRecord& rec) const;
     [[nodiscard]] QVector<IdRangeRule> parsedUserIdRulesFromUi() const;
     [[nodiscard]] QVector<IdRangeRule> mergedAliasRulesForAnalysis() const;
     [[nodiscard]] QVector<IdRangeRule> parsedAndDatabaseRulesForResourceFilter() const;
