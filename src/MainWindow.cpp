@@ -4573,7 +4573,9 @@ bool MainWindow::packetKindIntroducesResourceCandidates(PacketKind k) const
 void MainWindow::updateGatherablesFromProtobufPayload(const QByteArray& payload, PacketKind sourceKind)
 {
     QList<quint64> vars;
-    extractProtobufStyleVarints(payload, &vars);
+    // Para RECO (IEU/IER) el ID de recurso a veces no aparece como varint plano.
+    // Usamos wire-format para extraer varint + fixed32 + fixed64 (y anidados best-effort).
+    extractProtobufWireNumericScalars(payload, &vars);
     const QVector<IdRangeRule> merged = mergedAliasRulesForAnalysis();
     // IMPORTANTE: algunos paquetes de recolección (RECO) contienen varints grandes (p. ej. 514168)
     // que NO son ID de mapa. Si usamos la heurística de mapa aquí, se “resetea” la sesión y se

@@ -1,5 +1,6 @@
 #include "ProtocolLogAnalyzer.h"
 #include "PacketTypeOverrides.h"
+#include "ProtobufParser.h"
 
 #include <QHash>
 #include <QStringList>
@@ -552,6 +553,34 @@ void extractProtobufStyleVarints(const QByteArray& payload, QList<quint64>* outV
     scanAllVarints(payload, outValues);
 }
 
+static void collectWireNumsRec(const QList<ProtoField>& fields, QList<quint64>* out, int depth)
+{
+    if (out == nullptr) return;
+    if (depth > 12) return;
+    for (const ProtoField& f : fields) {
+        if (f.wireType == 0 || f.wireType == 1 || f.wireType == 5) {
+            const quint64 v = static_cast<quint64>(f.value.toULongLong());
+            out->push_back(v);
+        }
+        if (f.isNested && !f.nested.isEmpty()) {
+            collectWireNumsRec(f.nested, out, depth + 1);
+        }
+    }
+}
+
+void extractProtobufWireNumericScalars(const QByteArray& payload, QList<quint64>* outValues)
+{
+    if (outValues == nullptr) {
+        return;
+    }
+    ProtobufParser parser;
+    const QList<ProtoField> fields = parser.parse(payload);
+    if (fields.isEmpty()) {
+        return;
+    }
+    collectWireNumsRec(fields, outValues, 0);
+}
+
 QList<quint64> filterResourceCandidateIds(const QList<quint64>& varints, const QVector<IdRangeRule>& extraRules)
 {
     QVector<IdRangeRule> merged = extraRules + defaultBuiltinIdRules();
@@ -886,7 +915,11 @@ ProtocolPacketRecord buildRecordFromPayload(int packetIndex, bool fromClient, co
     if (!r.stringsFound.isEmpty()) {
         r.primaryUrl = r.stringsFound.first();
     }
-    extractProtobufStyleVarints(payload, &r.numericIds);
+    // Mejor que scanAllVarints: incluye fixed32/fixed64 y anidados (para RECO IEU/IER/ITV etc.).
+    extractProtobufWireNumericScalars(payload, &r.numericIds);
+    if (r.numericIds.isEmpty()) {
+        extractProtobufStyleVarints(payload, &r.numericIds);
+    }
     return r;
 }
 

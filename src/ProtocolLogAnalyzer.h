@@ -100,6 +100,10 @@ void extractAnkamaTypeUrls(const QByteArray& payload, QStringList* outUrls);
 
 void extractProtobufStyleVarints(const QByteArray& payload, QList<quint64>* outValues);
 
+/// Extrae números del wire-format Protobuf (varint + fixed32 + fixed64) recorriendo anidados best-effort.
+/// Útil para RECO (IEU/IER) donde el ID del recurso puede no aparecer como varint plano.
+void extractProtobufWireNumericScalars(const QByteArray& payload, QList<quint64>* outValues);
+
 [[nodiscard]] ProtocolPacketRecord buildRecordFromPayload(int packetIndex, bool fromClient,
                                                           const QByteArray& payload,
                                                           const PacketTypeOverrides* overrides = nullptr);
