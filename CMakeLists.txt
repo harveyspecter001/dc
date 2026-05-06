@@ -33,6 +33,7 @@ set(DOFPS_SOURCES
     src/IdDatabase.cpp
     src/PacketTypeOverrides.cpp
     src/ProtocolLogAnalyzer.cpp
+    src/ProtobufParser.cpp
     src/ResourcePredictor.cpp
     src/DiagnosticsLogWindow.cpp
     src/DebugCentralLog.cpp

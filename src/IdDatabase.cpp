@@ -37,6 +37,8 @@ void IdDatabase::clear()
     customNotes_.clear();
     resourceCaptureHex_.clear();
     monsterCaptureHex_.clear();
+    resourceCaptureDetail_.clear();
+    monsterCaptureDetail_.clear();
 }
 
 QString IdDatabase::defaultStoragePath()
@@ -77,6 +79,8 @@ bool IdDatabase::loadFromFile(const QString& path, QString* errorOut)
     insertJsonObjectIntoMap(root.value(QStringLiteral("custom_notes")).toObject(), &customNotes_);
     insertJsonObjectIntoMap(root.value(QStringLiteral("resource_capture_hex")).toObject(), &resourceCaptureHex_);
     insertJsonObjectIntoMap(root.value(QStringLiteral("monster_capture_hex")).toObject(), &monsterCaptureHex_);
+    insertJsonObjectIntoMap(root.value(QStringLiteral("resource_capture_detail")).toObject(), &resourceCaptureDetail_);
+    insertJsonObjectIntoMap(root.value(QStringLiteral("monster_capture_detail")).toObject(), &monsterCaptureDetail_);
     return true;
 }
 
@@ -134,6 +138,20 @@ bool IdDatabase::saveToFile(const QString& path, QString* errorOut) const
             o.insert(QString::number(it.key()), it.value());
         }
         root.insert(QStringLiteral("monster_capture_hex"), o);
+    }
+    {
+        QJsonObject o;
+        for (auto it = resourceCaptureDetail_.constBegin(); it != resourceCaptureDetail_.constEnd(); ++it) {
+            o.insert(QString::number(it.key()), it.value());
+        }
+        root.insert(QStringLiteral("resource_capture_detail"), o);
+    }
+    {
+        QJsonObject o;
+        for (auto it = monsterCaptureDetail_.constBegin(); it != monsterCaptureDetail_.constEnd(); ++it) {
+            o.insert(QString::number(it.key()), it.value());
+        }
+        root.insert(QStringLiteral("monster_capture_detail"), o);
     }
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {

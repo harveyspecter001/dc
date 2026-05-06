@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 #include "ResourceAliasEditor.h"
 #include "ResourcePredictor.h"
+#include "ProtobufParser.h"
 #include "DebugCentralLog.h"
 #include "DiagnosticsLogWindow.h"
 #include "TcpMitmProxy.h"
@@ -3364,6 +3365,29 @@ QString MainWindow::buildProtocolPacketDetailHtml(const ProtocolPacketRecord& re
         html += QStringLiteral("</p>");
     }
 
+    // Protobuf wire-format (best-effort). No requiere .proto; solo tag/wire types con heurística.
+    {
+        const QString ctx = !rec.primaryUrl.isEmpty()
+                                ? rec.primaryUrl
+                                : detectPacketContext(rec.rawPayload);
+        ProtobufParser parser;
+        const QList<ProtoField> fields = parser.parse(rec.rawPayload);
+        if (!fields.isEmpty()) {
+            QString proto = formatProtoFields(fields, 0, ctx);
+            const int maxChars = 12000;
+            if (proto.size() > maxChars) {
+                proto = proto.left(maxChars) + QStringLiteral("\n… (truncado)\n");
+            }
+            if (!proto.trimmed().isEmpty()) {
+                html += QStringLiteral("<p><b style=\"color:#93c5fd;\">📦 ESTRUCTURA PROTOBUF (indentada)</b></p>");
+                html += QStringLiteral("<pre style=\"white-space:pre-wrap;font-family:Consolas,monospace;"
+                                       "font-size:10pt;color:#e0f2fe;background:#0b1220;padding:8px;"
+                                       "border:1px solid #1f2937;border-radius:8px;\">%1</pre>")
+                            .arg(proto.toHtmlEscaped());
+            }
+        }
+    }
+
     html += QStringLiteral("<p><b style=\"color:#86efac;\">IDs / varints</b> (hasta 40 con alias)<br>");
     const int idLim = qMin(40, rec.numericIds.size());
     for (int i = 0; i < idLim; ++i) {
@@ -4929,6 +4953,15 @@ void MainWindow::addSelectedResourceCandidateAsOverride()
         cap[id] = srcHex;
         idDatabase_.setResourceCaptureHex(cap);
     }
+    {
+        QString detail = QStringLiteral("origen=%1; interacción=%2; mapa_ui=%3")
+                             .arg(resourceCandidateIntroLogLabel_.value(id, QStringLiteral("—")),
+                                  resourceCandidateInteractLogLabel_.value(id, QStringLiteral("—")),
+                                  lastMapGuess_ != 0 ? QString::number(lastMapGuess_) : QStringLiteral("—"));
+        auto det = idDatabase_.resourceCaptureDetail();
+        det[id] = detail;
+        idDatabase_.setResourceCaptureDetail(det);
+    }
 
     auto res = idDatabase_.resourceOverrides();
     res[id] = name.trimmed();
@@ -4981,6 +5014,15 @@ void MainWindow::addSelectedResourceCandidateAsMonster()
         auto cap = idDatabase_.monsterCaptureHex();
         cap[id] = srcHex;
         idDatabase_.setMonsterCaptureHex(cap);
+    }
+    {
+        QString detail = QStringLiteral("origen=%1; interacción=%2; mapa_ui=%3")
+                             .arg(resourceCandidateIntroLogLabel_.value(id, QStringLiteral("—")),
+                                  resourceCandidateInteractLogLabel_.value(id, QStringLiteral("—")),
+                                  lastMapGuess_ != 0 ? QString::number(lastMapGuess_) : QStringLiteral("—"));
+        auto det = idDatabase_.monsterCaptureDetail();
+        det[id] = detail;
+        idDatabase_.setMonsterCaptureDetail(det);
     }
 
     auto mon = idDatabase_.monsterNames();
@@ -5130,6 +5172,16 @@ void MainWindow::promptSaveIdFromPacketDetail(quint64 id)
     if (id == 0) {
         return;
     }
+    // Guardamos con hex + detalle desde el paquete actualmente seleccionado.
+    ProtocolPacketRecord curRec;
+    bool haveCurRec = false;
+    if (protocolLogTree_ != nullptr && protocolLogTree_->currentItem() != nullptr) {
+        const int vix = protocolLogTree_->currentItem()->data(0, kProtoVecRole).toInt();
+        if (vix >= 0 && vix < protocolRecords_.size()) {
+            curRec = protocolRecords_.at(vix);
+            haveCurRec = true;
+        }
+    }
     QMenu menu(this);
     QAction* actRes =
         menu.addAction(QStringLiteral("💾 Guardar como recurso…"));
@@ -5139,7 +5191,7 @@ void MainWindow::promptSaveIdFromPacketDetail(quint64 id)
     if (chosen == nullptr) {
         return;
     }
-    auto saveName = [this, id](bool asMonster) -> bool {
+    auto saveName = [this, id, haveCurRec, curRec](bool asMonster) -> bool {
         const QString name =
             asMonster ? promptPickMonsterDisplayName(id) : promptPickResourceDisplayName(id);
         if (name.trimmed().isEmpty()) {
@@ -5150,10 +5202,58 @@ void MainWindow::promptSaveIdFromPacketDetail(quint64 id)
             auto mon = idDatabase_.monsterNames();
             mon[id] = name.trimmed();
             idDatabase_.setMonsterNames(mon);
+            if (haveCurRec) {
+                auto hx = idDatabase_.monsterCaptureHex();
+                hx[id] = QString::fromLatin1(curRec.rawPayload.toHex());
+                idDatabase_.setMonsterCaptureHex(hx);
+                auto det = idDatabase_.monsterCaptureDetail();
+                QString body = buildPacketAnalysisText(curRec, mergedAliasRulesForAnalysis(), 512,
+                                                      &idDatabase_.customNotesById());
+                ProtobufParser parser;
+                const QString ctx = !curRec.primaryUrl.isEmpty() ? curRec.primaryUrl : detectPacketContext(curRec.rawPayload);
+                const QList<ProtoField> fields = parser.parse(curRec.rawPayload);
+                if (!fields.isEmpty()) {
+                    QString proto = formatProtoFields(fields, 0, ctx);
+                    if (!proto.trimmed().isEmpty()) {
+                        body += QStringLiteral("\n\n📦 ESTRUCTURA PROTOBUF (indentada):\n");
+                        body += proto;
+                    }
+                }
+                const int maxChars = 20000;
+                if (body.size() > maxChars) {
+                    body = body.left(maxChars) + QStringLiteral("\n… (truncado)\n");
+                }
+                det[id] = body;
+                idDatabase_.setMonsterCaptureDetail(det);
+            }
         } else {
             auto res = idDatabase_.resourceOverrides();
             res[id] = name.trimmed();
             idDatabase_.setResourceOverrides(res);
+            if (haveCurRec) {
+                auto hx = idDatabase_.resourceCaptureHex();
+                hx[id] = QString::fromLatin1(curRec.rawPayload.toHex());
+                idDatabase_.setResourceCaptureHex(hx);
+                auto det = idDatabase_.resourceCaptureDetail();
+                QString body = buildPacketAnalysisText(curRec, mergedAliasRulesForAnalysis(), 512,
+                                                      &idDatabase_.customNotesById());
+                ProtobufParser parser;
+                const QString ctx = !curRec.primaryUrl.isEmpty() ? curRec.primaryUrl : detectPacketContext(curRec.rawPayload);
+                const QList<ProtoField> fields = parser.parse(curRec.rawPayload);
+                if (!fields.isEmpty()) {
+                    QString proto = formatProtoFields(fields, 0, ctx);
+                    if (!proto.trimmed().isEmpty()) {
+                        body += QStringLiteral("\n\n📦 ESTRUCTURA PROTOBUF (indentada):\n");
+                        body += proto;
+                    }
+                }
+                const int maxChars = 20000;
+                if (body.size() > maxChars) {
+                    body = body.left(maxChars) + QStringLiteral("\n… (truncado)\n");
+                }
+                det[id] = body;
+                idDatabase_.setResourceCaptureDetail(det);
+            }
         }
         if (!idDatabase_.saveToFile(IdDatabase::defaultStoragePath(), &err)) {
             QMessageBox::warning(this, QStringLiteral("Guardar"), err);
@@ -5221,11 +5321,21 @@ void MainWindow::refreshSavedResMonUi()
                 tip = QStringLiteral("Hex de captura (recurso):\n%1")
                           .arg(hx.size() > 900 ? hx.left(900).append(QStringLiteral("…")) : hx);
             }
+            const QString det = idDatabase_.resourceCaptureDetail().value(rid);
+            if (!det.isEmpty()) {
+                tip += QStringLiteral("\n\nDetalle:\n%1")
+                           .arg(det.size() > 2200 ? det.left(2200).append(QStringLiteral("\n…")) : det);
+            }
         } else if (rows.at(i).kind == QStringLiteral("monstruo")) {
             const QString hx = idDatabase_.monsterCaptureHex().value(rid);
             if (!hx.isEmpty()) {
                 tip = QStringLiteral("Hex de captura (monstruo):\n%1")
                           .arg(hx.size() > 900 ? hx.left(900).append(QStringLiteral("…")) : hx);
+            }
+            const QString det = idDatabase_.monsterCaptureDetail().value(rid);
+            if (!det.isEmpty()) {
+                tip += QStringLiteral("\n\nDetalle:\n%1")
+                           .arg(det.size() > 2200 ? det.left(2200).append(QStringLiteral("\n…")) : det);
             }
         }
         if (!tip.isEmpty()) {
@@ -5297,6 +5407,9 @@ void MainWindow::removeSelectedSavedEntry()
         auto hx = idDatabase_.resourceCaptureHex();
         hx.remove(id);
         idDatabase_.setResourceCaptureHex(hx);
+        auto det = idDatabase_.resourceCaptureDetail();
+        det.remove(id);
+        idDatabase_.setResourceCaptureDetail(det);
     } else if (kind == QStringLiteral("monstruo")) {
         auto mon = idDatabase_.monsterNames();
         mon.remove(id);
@@ -5304,6 +5417,9 @@ void MainWindow::removeSelectedSavedEntry()
         auto hx = idDatabase_.monsterCaptureHex();
         hx.remove(id);
         idDatabase_.setMonsterCaptureHex(hx);
+        auto det = idDatabase_.monsterCaptureDetail();
+        det.remove(id);
+        idDatabase_.setMonsterCaptureDetail(det);
     } else {
         return;
     }

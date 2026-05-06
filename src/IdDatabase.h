@@ -37,8 +37,12 @@ public:
     /// Hex ASCII del último paquete de mapa desde el que se guardó el candidato (estudio offline).
     [[nodiscard]] const QHash<quint64, QString>& resourceCaptureHex() const { return resourceCaptureHex_; }
     [[nodiscard]] const QHash<quint64, QString>& monsterCaptureHex() const { return monsterCaptureHex_; }
+    [[nodiscard]] const QHash<quint64, QString>& resourceCaptureDetail() const { return resourceCaptureDetail_; }
+    [[nodiscard]] const QHash<quint64, QString>& monsterCaptureDetail() const { return monsterCaptureDetail_; }
     void setResourceCaptureHex(const QHash<quint64, QString>& m) { resourceCaptureHex_ = m; }
     void setMonsterCaptureHex(const QHash<quint64, QString>& m) { monsterCaptureHex_ = m; }
+    void setResourceCaptureDetail(const QHash<quint64, QString>& m) { resourceCaptureDetail_ = m; }
+    void setMonsterCaptureDetail(const QHash<quint64, QString>& m) { monsterCaptureDetail_ = m; }
 
 private:
     QHash<quint64, QString> resources_;
@@ -48,4 +52,6 @@ private:
     QHash<quint64, QString> customNotes_;
     QHash<quint64, QString> resourceCaptureHex_;
     QHash<quint64, QString> monsterCaptureHex_;
+    QHash<quint64, QString> resourceCaptureDetail_;
+    QHash<quint64, QString> monsterCaptureDetail_;
 };
