@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "ResourceAliasEditor.h"
 #include "DebugCentralLog.h"
 #include "DiagnosticsLogWindow.h"
 #include "TcpMitmProxy.h"
@@ -19,8 +20,10 @@
 #include <QAbstractItemView>
 #include <QCheckBox>
 #include <QCloseEvent>
+#include <QDesktopServices>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QUrl>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
@@ -51,6 +54,8 @@
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QComboBox>
+#include <QListWidget>
+#include <QTextEdit>
 #include <QBrush>
 #include <QColor>
 #include <QStatusBar>
@@ -319,11 +324,30 @@ MainWindow::MainWindow(QWidget* parent)
         return sc;
     };
 
-    auto* tabWidget = new QTabWidget;
-    tabWidget->setDocumentMode(true);
-    tabWidget->setUsesScrollButtons(true);
-    tabWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    setCentralWidget(tabWidget);
+    mainTabWidget_ = new QTabWidget;
+    mainTabWidget_->setDocumentMode(true);
+    mainTabWidget_->setUsesScrollButtons(true);
+    mainTabWidget_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    setCentralWidget(mainTabWidget_);
+
+    {
+        QToolBar* tb = addToolBar(QStringLiteral("Principal"));
+        tb->setMovable(false);
+        auto* gear = new QPushButton(QStringLiteral("\u2699"));
+        gear->setFixedWidth(36);
+        gear->setToolTip(QStringLiteral("Mostrar / ocultar pestaña Avanzado"));
+        connect(gear, &QPushButton::clicked, this, [this]() {
+            if (mainTabWidget_ == nullptr || advancedTabWrap_ == nullptr) {
+                return;
+            }
+            const int idx = mainTabWidget_->indexOf(advancedTabWrap_);
+            if (idx < 0) {
+                return;
+            }
+            mainTabWidget_->setTabVisible(idx, !mainTabWidget_->isTabVisible(idx));
+        });
+        tb->addWidget(gear);
+    }
 
     // —— Pestaña Proxy (vista simple) ——
     auto* pageProxyMain = new QWidget;
@@ -421,7 +445,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(testProxyBtn_, &QPushButton::clicked, this, &MainWindow::onTestProxyClicked);
     pmLay->addWidget(testProxyBtn_);
 
-    tabWidget->addTab(wrapInScroll(pageProxyMain), QStringLiteral("Proxy"));
+    mainTabWidget_->addTab(wrapInScroll(pageProxyMain), QStringLiteral("Proxy"));
 
     auto* pageRes = new QWidget;
     {
@@ -461,6 +485,11 @@ MainWindow::MainWindow(QWidget* parent)
             QStringLiteral("Tabla: ID, nombre, tipo (recurso/monstruo/objeto) y notas. Se guarda junto al .exe."));
         connect(editIdsBtn_, &QPushButton::clicked, this, &MainWindow::onEditIdsClicked);
         v->addWidget(editIdsBtn_);
+        editResourcesGuiBtn_ = new QPushButton(QStringLiteral("✏️ Editar recursos / monstruos (GUI)"));
+        editResourcesGuiBtn_->setToolTip(
+            QStringLiteral("Editor visual de ids_database.json sin editar JSON a mano."));
+        connect(editResourcesGuiBtn_, &QPushButton::clicked, this, &MainWindow::openResourceEditor);
+        v->addWidget(editResourcesGuiBtn_);
     }
     auto* pageProto = new QWidget;
     {
@@ -606,8 +635,8 @@ MainWindow::MainWindow(QWidget* parent)
         connect(protocolLogTree_, &QTreeWidget::customContextMenuRequested, this,
                 &MainWindow::onProtocolLogContextMenu);
     }
-    tabWidget->insertTab(1, wrapInScroll(pageRes), QStringLiteral("Recursos"));
-    tabWidget->insertTab(2, wrapInScroll(pageProto), QStringLiteral("Logs"));
+    mainTabWidget_->insertTab(1, wrapInScroll(pageRes), QStringLiteral("Recursos"));
+    mainTabWidget_->insertTab(2, wrapInScroll(pageProto), QStringLiteral("Logs"));
 
     // —— Bloques para pestaña Avanzado ——
     auto* pageProc = new QWidget;
@@ -1113,7 +1142,14 @@ MainWindow::MainWindow(QWidget* parent)
         "Las flechas de movimiento están en la pestaña <b>Proxy</b> (mismo modelo JSON).")));
     ml->addStretch(0);
     advRoot->addWidget(wrapInScroll(pageMap));
-    tabWidget->addTab(wrapInScroll(pageAdv), QStringLiteral("Avanzado"));
+    {
+        auto* pageLibrary = new QWidget;
+        setupLibraryTab(pageLibrary);
+        mainTabWidget_->insertTab(3, wrapInScroll(pageLibrary), QStringLiteral("📁 Biblioteca"));
+    }
+    advancedTabWrap_ = wrapInScroll(pageAdv);
+    mainTabWidget_->addTab(advancedTabWrap_, QStringLiteral("Avanzado"));
+    mainTabWidget_->setTabVisible(mainTabWidget_->indexOf(advancedTabWrap_), false);
 
     statusBar()->show();
     characterStatusBarLbl_ = new QLabel(
@@ -2482,7 +2518,7 @@ QColor MainWindow::protocolKindColor(PacketKind k) const
     case PacketKind::IriMovement:
         return Qt::green;
     case PacketKind::IeeHarvest:
-        return Qt::darkGreen;
+        return QColor(34, 139, 34); // forest green
     case PacketKind::IsoResources:
         return QColor(255, 200, 100);
     case PacketKind::IrxMonsters:
@@ -2492,7 +2528,7 @@ QColor MainWindow::protocolKindColor(PacketKind k) const
     case PacketKind::IdrItemReceived:
         return QColor(100, 255, 100);
     case PacketKind::IslEntities:
-        return QColor(200, 180, 255);
+        return QColor(200, 150, 255);
     case PacketKind::CommandData:
         return QColor(255, 140, 90);
     case PacketKind::DataGeneric:
@@ -2615,6 +2651,15 @@ QString MainWindow::buildProtocolPacketDetailHtml(const ProtocolPacketRecord& re
     }
     html += QStringLiteral("</p>");
 
+    if (rec.kind == PacketKind::IrxMonsters || rec.kind == PacketKind::IslEntities) {
+        const QString irxBlock = analyzeIrxStyleVarintBuckets(rec.numericIds);
+        if (!irxBlock.isEmpty()) {
+            html += QStringLiteral("<p><b style=\"color:#fca5a5;\">Heurística IRX / lista</b></p><pre style="
+                                   "white-space:pre-wrap;font-family:Consolas,monospace;font-size:10pt;color:#fdba74;\">%1</pre>")
+                        .arg(irxBlock.toHtmlEscaped());
+        }
+    }
+
     constexpr int kMaxHexUiBytes = 512 * 1024;
     const int payloadSz = rec.rawPayload.size();
     const bool truncPanel = payloadSz > kMaxHexUiBytes;
@@ -2694,6 +2739,152 @@ QString MainWindow::harvestTemplateBinPath() const
     return QCoreApplication::applicationDirPath() + QStringLiteral("/plantilla_recolectar.bin");
 }
 
+void MainWindow::setupLibraryTab(QWidget* tab)
+{
+    auto* layout = new QVBoxLayout(tab);
+    auto* infoLabel = new QLabel(QStringLiteral(
+        "Archivos generados con «Guardar selección con nombre y nota» o exportaciones en "
+        "<code>exported_logs</code> junto al ejecutable."));
+    infoLabel->setWordWrap(true);
+    layout->addWidget(infoLabel);
+
+    layout->addWidget(new QLabel(QStringLiteral("📁 Archivos guardados:")));
+    libraryLogList_ = new QListWidget;
+    libraryLogList_->setSelectionMode(QAbstractItemView::SingleSelection);
+    layout->addWidget(libraryLogList_, 1);
+
+    layout->addWidget(new QLabel(QStringLiteral("📄 Vista previa (primeras líneas):")));
+    libraryPreviewEdit_ = new QTextEdit;
+    libraryPreviewEdit_->setReadOnly(true);
+    libraryPreviewEdit_->setMaximumHeight(220);
+    {
+        auto fnt = libraryPreviewEdit_->font();
+        fnt.setFamily(QStringLiteral("Consolas"));
+        libraryPreviewEdit_->setFont(fnt);
+    }
+    layout->addWidget(libraryPreviewEdit_);
+
+    auto* btnLayout = new QHBoxLayout;
+    auto* openBtn = new QPushButton(QStringLiteral("📂 Abrir en editor externo"));
+    auto* deleteBtn = new QPushButton(QStringLiteral("🗑 Eliminar"));
+    auto* refreshBtn = new QPushButton(QStringLiteral("🔄 Actualizar"));
+    btnLayout->addWidget(openBtn);
+    btnLayout->addWidget(deleteBtn);
+    btnLayout->addWidget(refreshBtn);
+    btnLayout->addStretch(1);
+    layout->addLayout(btnLayout);
+
+    connect(libraryLogList_, &QListWidget::currentItemChanged, this,
+            [this](QListWidgetItem* item, QListWidgetItem* /*previous*/) {
+                if (libraryPreviewEdit_ == nullptr || item == nullptr) {
+                    return;
+                }
+                const QString dirPath =
+                    QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("exported_logs"));
+                const QString path = QDir(dirPath).filePath(item->text());
+                QFile file(path);
+                if (!file.open(QIODevice::ReadOnly)) {
+                    libraryPreviewEdit_->setPlainText(QStringLiteral("(no se pudo leer el archivo)"));
+                    return;
+                }
+                const QString content = QString::fromUtf8(file.readAll());
+                file.close();
+                const QStringList lines = content.split(QLatin1Char('\n'));
+                const QString head = lines.mid(0, 30).join(QLatin1Char('\n'));
+                libraryPreviewEdit_->setPlainText(head
+                                                   + (lines.size() > 30 ? QStringLiteral("\n\n... (truncado)")
+                                                                         : QString()));
+            });
+
+    connect(openBtn, &QPushButton::clicked, this, [this]() {
+        if (libraryLogList_ == nullptr || libraryLogList_->currentItem() == nullptr) {
+            return;
+        }
+        const QString dirPath =
+            QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("exported_logs"));
+        const QString path = QDir(dirPath).filePath(libraryLogList_->currentItem()->text());
+        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+    });
+
+    connect(deleteBtn, &QPushButton::clicked, this, [this]() {
+        if (libraryLogList_ == nullptr || libraryLogList_->currentItem() == nullptr) {
+            return;
+        }
+        const QString name = libraryLogList_->currentItem()->text();
+        if (QMessageBox::question(this, QStringLiteral("Confirmar"),
+                                  QStringLiteral("¿Eliminar «%1»?").arg(name))
+            != QMessageBox::Yes) {
+            return;
+        }
+        const QString dirPath =
+            QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("exported_logs"));
+        const QString path = QDir(dirPath).filePath(name);
+        QFile::remove(path);
+        refreshExportedLogsList();
+        if (libraryPreviewEdit_ != nullptr) {
+            libraryPreviewEdit_->clear();
+        }
+    });
+
+    connect(refreshBtn, &QPushButton::clicked, this, &MainWindow::refreshExportedLogsList);
+    refreshExportedLogsList();
+}
+
+void MainWindow::refreshExportedLogsList()
+{
+    if (libraryLogList_ == nullptr) {
+        return;
+    }
+    libraryLogList_->clear();
+    const QString dirPath =
+        QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("exported_logs"));
+    QDir dir(dirPath);
+    if (!dir.exists()) {
+        dir.mkpath(QStringLiteral("."));
+    }
+    const QFileInfoList infos =
+        dir.entryInfoList(QStringList() << QStringLiteral("*.txt"), QDir::Files, QDir::Time | QDir::Reversed);
+    for (const QFileInfo& fi : infos) {
+        auto* item = new QListWidgetItem(fi.fileName());
+        item->setToolTip(QStringLiteral("Modificado: %1\n%2")
+                             .arg(fi.lastModified().toString(Qt::ISODateWithMs))
+                             .arg(QDir::toNativeSeparators(fi.absoluteFilePath())));
+        libraryLogList_->addItem(item);
+    }
+}
+
+void MainWindow::openResourceEditor()
+{
+    ResourceAliasEditor dlg(this);
+    dlg.loadFromMaps(idDatabase_.resourceOverrides(), idDatabase_.monsterNames(), idDatabase_.objectNames(),
+                     idDatabase_.customNotesById());
+    if (dlg.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    QHash<quint64, QString> res;
+    QHash<quint64, QString> mon;
+    QHash<quint64, QString> obj;
+    QHash<quint64, QString> notes;
+    dlg.applyToMaps(&res, &mon, &obj, &notes);
+    idDatabase_.setResourceOverrides(res);
+    idDatabase_.setMonsterNames(mon);
+    idDatabase_.setObjectNames(obj);
+    idDatabase_.setCustomNotes(notes);
+
+    QString err;
+    if (!idDatabase_.saveToFile(IdDatabase::defaultStoragePath(), &err)) {
+        QMessageBox::warning(this, QStringLiteral("Guardar"),
+                             QStringLiteral("No se pudo guardar ids_database.json:\n%1").arg(err));
+        return;
+    }
+    reloadIdDatabaseFromDisk();
+    rebuildResourcesTableFromRecords();
+    refreshProtocolDetailFromSelection();
+    QMessageBox::information(this, QStringLiteral("Guardado"),
+                             QStringLiteral("ids_database.json actualizado correctamente."));
+}
+
 void MainWindow::appendProtocolTreeItem(const ProtocolPacketRecord& r, int vectorIndex)
 {
     if (protocolLogTree_ == nullptr) {
@@ -2747,6 +2938,9 @@ void MainWindow::appendProtocolTreeItem(const ProtocolPacketRecord& r, int vecto
     protocolLogTree_->resizeColumnToContents(4);
     if (protocolLogAutoScrollChk_ != nullptr && protocolLogAutoScrollChk_->isChecked()) {
         protocolLogTree_->scrollToItem(it, QAbstractItemView::PositionAtBottom);
+        if (QScrollBar* sb = protocolLogTree_->verticalScrollBar()) {
+            sb->setValue(sb->maximum());
+        }
     }
 }
 
@@ -2969,6 +3163,7 @@ void MainWindow::onExportSelectedWithNote()
         out << QLatin1Char('\n');
     }
     f.close();
+    refreshExportedLogsList();
     statusBar()->showMessage(QStringLiteral("Log guardado: %1").arg(QDir::toNativeSeparators(fileName)), 10000);
 }
 

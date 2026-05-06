@@ -29,7 +29,10 @@ class QGroupBox;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QComboBox;
+class QListWidget;
 class QPlainTextEdit;
+class QTabWidget;
+class QTextEdit;
 class QTextBrowser;
 class QSplitter;
 
@@ -87,6 +90,8 @@ private slots:
     void onProtocolLogCurrentItemChanged(QTreeWidgetItem* current, QTreeWidgetItem* previous);
     void onProtocolLogContextMenu(const QPoint& pos);
     void onExportSelectedWithNote();
+    void refreshExportedLogsList();
+    void openResourceEditor();
     void onIdAliasRulesChanged();
     void onEditIdsClicked();
     void onHarvestWaitTimeout();
@@ -202,7 +207,12 @@ private:
     QTableWidget* resourcesTable_ = nullptr;
     QPushButton* refreshResourcesBtn_ = nullptr;
     QPushButton* editIdsBtn_ = nullptr;
+    QPushButton* editResourcesGuiBtn_ = nullptr;
     QLabel* monstersMapLbl_ = nullptr;
+    QTabWidget* mainTabWidget_ = nullptr;
+    QWidget* advancedTabWrap_ = nullptr;
+    QListWidget* libraryLogList_ = nullptr;
+    QTextEdit* libraryPreviewEdit_ = nullptr;
     QTreeWidget* protocolLogTree_ = nullptr;
     QComboBox* protocolKindFilter_ = nullptr;
     QCheckBox* protocolLogAutoScrollChk_ = nullptr;
@@ -262,6 +272,7 @@ private:
     void reloadIdDatabaseFromDisk();
     void reloadHarvestTemplateFromDisk();
     [[nodiscard]] QString harvestTemplateBinPath() const;
+    void setupLibraryTab(QWidget* tab);
     void appendProtocolTreeItem(const ProtocolPacketRecord& r, int vectorIndex);
     void refreshProtocolDetailFromSelection();
     void saveSelectedPacketAsTemplate(const QString& cardinalEs);

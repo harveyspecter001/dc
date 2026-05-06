@@ -35,6 +35,7 @@ set(DOFPS_SOURCES
     src/DiagnosticsLogWindow.cpp
     src/DebugCentralLog.cpp
     src/MainWindow.cpp
+    src/ResourceAliasEditor.cpp
 )
 
 if (WIN32)

@@ -80,6 +80,9 @@ void guessCharacterFromServerPayload(const QByteArray& payload, int packetIndex,
 
 [[nodiscard]] QString formatHexDumpWireshark(const QByteArray& data, int maxBytes = 256);
 
+/// Agrupa varints típicos en IRX (monstruos vs jugadores vs otros).
+[[nodiscard]] QString analyzeIrxStyleVarintBuckets(const QList<quint64>& numericIds);
+
 [[nodiscard]] QString buildPacketAnalysisText(const ProtocolPacketRecord& rec, const QVector<IdRangeRule>& rulesChain,
                                                int hexMaxBytes = 256,
                                                const QHash<quint64, QString>* exactIdNotes = nullptr);

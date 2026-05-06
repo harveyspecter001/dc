@@ -351,6 +351,58 @@ QString formatHexDumpWireshark(const QByteArray& data, int maxBytes)
     return out;
 }
 
+QString analyzeIrxStyleVarintBuckets(const QList<quint64>& rawIds)
+{
+    QList<quint64> uniq = rawIds;
+    std::sort(uniq.begin(), uniq.end());
+    uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
+
+    QList<quint64> monsterIds;
+    QList<quint64> playerIds;
+    QList<quint64> structureIds;
+    QList<quint64> otherIds;
+
+    for (quint64 id : uniq) {
+        if (id >= 1000000ULL) {
+            monsterIds.append(id);
+        } else if (id >= 1000ULL && id <= 9999ULL) {
+            playerIds.append(id);
+        } else if (id > 0 && id < 1000ULL) {
+            structureIds.append(id);
+        } else {
+            otherIds.append(id);
+        }
+    }
+
+    QString result;
+    auto appendBlock = [&](const QString& title, const QList<quint64>& lst) {
+        if (lst.isEmpty()) {
+            return;
+        }
+        result += title;
+        for (quint64 id : lst) {
+            result += QStringLiteral("   • %1\n").arg(id);
+        }
+        result += QLatin1Char('\n');
+    };
+
+    appendBlock(QStringLiteral("MONSTRUOS / criaturas (IDs ≥ 1.000.000):\n"), monsterIds);
+    appendBlock(QStringLiteral("PERSONAJES / jugadores típicos (IDs 1.000–9.999):\n"), playerIds);
+    if (!playerIds.isEmpty()) {
+        result += QStringLiteral(
+            "   (No son monstruos del mapa; suelen ser IDs de jugador u otras entidades.)\n\n");
+    }
+    appendBlock(QStringLiteral("IDs pequeños — posible estructura interna (< 1.000):\n"), structureIds);
+    if (!otherIds.isEmpty()) {
+        result += QStringLiteral("Otros IDs:\n");
+        for (quint64 id : otherIds) {
+            result += QStringLiteral("   • %1\n").arg(id);
+        }
+        result += QLatin1Char('\n');
+    }
+    return result;
+}
+
 QString buildPacketAnalysisText(const ProtocolPacketRecord& rec, const QVector<IdRangeRule>& rulesChain,
                                 int hexMaxBytes, const QHash<quint64, QString>* exactIdNotes)
 {
@@ -392,6 +444,12 @@ QString buildPacketAnalysisText(const ProtocolPacketRecord& rec, const QVector<I
 
     if (rec.kind == PacketKind::IrxMonsters || rec.kind == PacketKind::IslEntities) {
         t += QStringLiteral("⚠ Tipo IRX / ISL — revisar IDs sin alias como posibles criaturas u objetos de lista.\n\n");
+        const QString buckets = analyzeIrxStyleVarintBuckets(rec.numericIds);
+        if (!buckets.isEmpty()) {
+            t += QStringLiteral("Clasificación heurística de varints (mapa vs jugador vs otros):\n");
+            t += buckets;
+            t += QLatin1String("────────────────────────────────────────\n");
+        }
     }
 
     if (!recursoLines.isEmpty()) {
