@@ -3,6 +3,8 @@
 #include <QByteArray>
 #include <QColor>
 #include <QFrame>
+#include <QMap>
+#include <QSet>
 #include <QMainWindow>
 #include <QString>
 #include <QVector>
@@ -30,12 +32,15 @@ class QGroupBox;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QComboBox;
+class QSpinBox;
 class QListWidget;
+class QListWidgetItem;
 class QPlainTextEdit;
 class QTabWidget;
 class QTextEdit;
 class QTextBrowser;
 class QSplitter;
+class QTableWidgetItem;
 
 class DiagnosticsLogWindow;
 class TcpMitmProxy;
@@ -84,6 +89,7 @@ private slots:
     void onNetstat5555Clicked();
 #endif
     void onProtocolPayloadCaptured(bool fromClient, const QByteArray& payload);
+    void appendProtocolCaptureRecord(bool fromClient, const QByteArray& payload);
     void onRefreshResourcesFromLogsClicked();
     void onImportExportedLogClicked();
     void onClearProtocolLogClicked();
@@ -188,11 +194,20 @@ private:
     QPushButton* importMovementLogBtn_ = nullptr;
     QLabel* iriTokenStatusLbl_ = nullptr;
     QLabel* iriTemplateCheckLbl_ = nullptr;
+    QLabel* movementSeqHintLbl_ = nullptr;
     QLabel* iriOfflineHintLbl_ = nullptr;
     QPushButton* arrowN_btn_ = nullptr;
     QPushButton* arrowS_btn_ = nullptr;
     QPushButton* arrowE_btn_ = nullptr;
     QPushButton* arrowO_btn_ = nullptr;
+    QPushButton* saveMapTransitMacroBtn_ = nullptr;
+    QPushButton* replayMapTransitMacroBtn_ = nullptr;
+    QSpinBox* mapTransitMacroDelaySpin_ = nullptr;
+
+    QVector<QByteArray> mapMacroReplayQueue_;
+    int mapMacroReplayNextIndex_ = 0;
+    int mapMacroReplayDelayMs_ = 250;
+    bool mapMacroReplayActive_ = false;
 
     QTimer* connMonitorTimer_ = nullptr;
 
@@ -209,13 +224,60 @@ private:
     QPushButton* refreshResourcesBtn_ = nullptr;
     QPushButton* editIdsBtn_ = nullptr;
     QPushButton* editResourcesGuiBtn_ = nullptr;
+    QTableWidget* savedResMonTable_ = nullptr;
+    QPushButton* addSavedResourceBtn_ = nullptr;
+    QPushButton* addSavedMonsterBtn_ = nullptr;
+    QPushButton* removeSavedEntryBtn_ = nullptr;
+    QTableWidget* resourceCandidatesTable_ = nullptr;
+    QLabel* resourceCandidatesHintLbl_ = nullptr;
+    QPushButton* refreshResourceCandidatesBtn_ = nullptr;
+    QPushButton* addResourceCandidateBtn_ = nullptr;
+    QPushButton* addMonsterCandidateBtn_ = nullptr;
+    QPushButton* hideResourceCandidateBtn_ = nullptr;
+    QPushButton* removeInteractedCandidatesBtn_ = nullptr;
     QLabel* monstersMapLbl_ = nullptr;
+    QLabel* isoMapSummarySectionTitleLbl_ = nullptr;
+    QTextBrowser* resourcesMapSummary_ = nullptr;
+    QLabel* resourcesMapUpdatedLbl_ = nullptr;
+    QLabel* resourceIsoSessionSubtitleLbl_ = nullptr;
+    QPlainTextEdit* resourceSessionHistory_ = nullptr;
+    QPushButton* exportResourcesCsvBtn_ = nullptr;
+
+    QLineEdit* librarySearchEdit_ = nullptr;
+    QPushButton* librarySearchBtn_ = nullptr;
+    QListWidget* librarySearchResults_ = nullptr;
+    QPushButton* libraryImportLogBtn_ = nullptr;
+
+    QFrame* irxClassifyFrame_ = nullptr;
+    QComboBox* irxIdCombo_ = nullptr;
+    QLineEdit* irxNameEdit_ = nullptr;
+    QPushButton* irxMarkMonsterBtn_ = nullptr;
+    QPushButton* irxMarkPersonajeBtn_ = nullptr;
+
+    QMap<QString, int> isoMapResourceTotals_;
+    QStringList resourceSessionSnapshots_;
+    QHash<quint64, int> resourceCandidateHits_;
+    QHash<quint64, int> resourceCandidateInteractedHits_;
+    /// Mapa inferido (`lastMapGuess_`) en el que se contó cada ID candidato (solo UI actual).
+    QHash<quint64, quint64> resourceCandidateSeenOnMap_;
+    /// Hex ASCII del primer paquete ISO/ITX/IER snapshot que añadió el ID en este mapa.
+    QHash<quint64, QString> resourceCandidateSourceHex_;
+    /// Ordenar: último toque RECO (ms epoch) — los más recientes primero.
+    QHash<quint64, qint64> resourceCandidateLastInteractMs_;
+    /// Misma etiqueta que columna «tipo» del log (p. ej. RECO · IEV TOQUE).
+    QHash<quint64, QString> resourceCandidateIntroLogLabel_;
+    QHash<quint64, QString> resourceCandidateInteractLogLabel_;
+
     QTabWidget* mainTabWidget_ = nullptr;
     QWidget* advancedTabWrap_ = nullptr;
     QListWidget* libraryLogList_ = nullptr;
     QTextEdit* libraryPreviewEdit_ = nullptr;
     QTreeWidget* protocolLogTree_ = nullptr;
     QComboBox* protocolKindFilter_ = nullptr;
+    QCheckBox* protocolPauseTableCaptureChk_ = nullptr;
+    QCheckBox* protocolMultiKindFilterChk_ = nullptr;
+    QPushButton* protocolPickMultiKindsBtn_ = nullptr;
+    QSet<PacketKind> protocolMultiKindPickSet_;
     QCheckBox* protocolLogAutoScrollChk_ = nullptr;
     QLineEdit* protocolSearchEdit_ = nullptr;
     QPushButton* clearProtocolLogBtn_ = nullptr;
@@ -250,6 +312,11 @@ private:
     QString appStyleSheet() const;
     void tryLoadDirectionMapFromField(bool logOk);
     void applyCardinal(const QString& cardinalEs);
+    [[nodiscard]] bool packetKindIsClientMapTransitMacro(PacketKind k) const;
+    [[nodiscard]] QString defaultMapTransitMacroPath() const;
+    void saveMapTransitMacroFromSelection();
+    void replayMapTransitMacroFromDialog();
+    void continueMapMacroReplayChain();
     void refreshIriDiagnostics();
     void onImportMovementLogClicked();
 
@@ -275,6 +342,14 @@ private:
     void reloadHarvestTemplateFromDisk();
     [[nodiscard]] QString harvestTemplateBinPath() const;
     void setupLibraryTab(QWidget* tab);
+    [[nodiscard]] QString displayNameForGatherableResource(quint64 id) const;
+    void refreshIsoResourcesSummaryUi();
+    void appendResourceSessionSnapshot(const QString& summaryLine);
+    void exportGatheredResourcesCsvDialog();
+    void librarySearchAcrossExportedLogs();
+    void importExportedLogFromPath(const QString& path);
+    void updateIrxQuickClassifyUi(int vecIndex);
+    void persistSelectedIrxId(bool asMonster);
     void appendProtocolTreeItem(const ProtocolPacketRecord& r, int vectorIndex);
     void syncProtocolTreeItemFromRecord(int vecIndex);
     void applyPacketKindOverride(int vecIndex, const QString& label);
@@ -284,9 +359,31 @@ private:
     void exportSelectedPacketAsJsonOrTxt();
     void showImportLogPreviewDialog(const QString& path);
     void applyProtocolLogFilters();
+    void openProtocolKindMultiFilterDialog();
+    [[nodiscard]] bool protocolKindPassesVisibleFilters(PacketKind k, int comboIndex) const;
     void rebuildResourcesTableFromRecords();
     void refreshCharacterLabels();
     void updateResourcesFromIsoPayload(const QByteArray& payload);
+    /// ISO + ITX + rutas RECO · IE(U/V/R) farmean mismos totals que la tabla de recursos.
+    void updateGatherablesFromProtobufPayload(const QByteArray& payload, PacketKind sourceKind);
+    [[nodiscard]] bool packetKindFeedsResourceTotals(PacketKind k) const;
+    /// Solo ISO / ITX / IER snapshot añaden filas a «candidatos» (no RECO continuo).
+    [[nodiscard]] bool packetKindIntroducesResourceCandidates(PacketKind k) const;
+    [[nodiscard]] bool isHeuristicResourceCandidateId(quint64 id) const;
+    void considerResourceCandidateId(quint64 id, const QByteArray& payload, PacketKind sourceKind);
+    void markResourceCandidateInteracted(quint64 id, PacketKind sourceKind);
+    void refreshResourceCandidatesUi();
+    void addSelectedResourceCandidateAsOverride();
+    void addSelectedResourceCandidateAsMonster();
+    void hideSelectedResourceCandidate();
+    void removeInteractedResourceCandidates();
+    void refreshSavedResMonUi();
+    void addSavedResourceDialog();
+    void addSavedMonsterDialog();
+    void removeSelectedSavedEntry();
+    void promptSaveIdFromPacketDetail(quint64 id);
+    [[nodiscard]] QString promptPickResourceDisplayName(quint64 id);
+    [[nodiscard]] QString promptPickMonsterDisplayName(quint64 id);
 
 #ifdef Q_OS_WIN
     [[nodiscard]] bool tryGetSelectedPid(quint32* outPid) const;

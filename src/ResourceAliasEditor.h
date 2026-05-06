@@ -12,11 +12,13 @@ public:
 
     void loadFromMaps(const QHash<quint64, QString>& resources,
                       const QHash<quint64, QString>& monsters,
+                      const QHash<quint64, QString>& players,
                       const QHash<quint64, QString>& objects,
                       const QHash<quint64, QString>& notes);
 
     void applyToMaps(QHash<quint64, QString>* resources,
                      QHash<quint64, QString>* monsters,
+                     QHash<quint64, QString>* players,
                      QHash<quint64, QString>* objects,
                      QHash<quint64, QString>* notes) const;
 

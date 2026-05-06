@@ -21,6 +21,10 @@ QString catMonster()
 {
     return QStringLiteral("monstruo");
 }
+QString catPlayer()
+{
+    return QStringLiteral("personaje");
+}
 QString catObject()
 {
     return QStringLiteral("objeto");
@@ -69,6 +73,7 @@ ResourceAliasEditor::ResourceAliasEditor(QWidget* parent)
         auto* cb = new QComboBox;
         cb->addItem(catResource());
         cb->addItem(catMonster());
+        cb->addItem(catPlayer());
         cb->addItem(catObject());
         table_->setCellWidget(row, 2, cb);
         table_->setItem(row, 3, new QTableWidgetItem());
@@ -85,6 +90,7 @@ ResourceAliasEditor::ResourceAliasEditor(QWidget* parent)
 
 void ResourceAliasEditor::loadFromMaps(const QHash<quint64, QString>& resources,
                                        const QHash<quint64, QString>& monsters,
+                                       const QHash<quint64, QString>& players,
                                        const QHash<quint64, QString>& objects,
                                        const QHash<quint64, QString>& notes)
 {
@@ -95,6 +101,9 @@ void ResourceAliasEditor::loadFromMaps(const QHash<quint64, QString>& resources,
         all.insert(it.key());
     }
     for (auto it = monsters.constBegin(); it != monsters.constEnd(); ++it) {
+        all.insert(it.key());
+    }
+    for (auto it = players.constBegin(); it != players.constEnd(); ++it) {
         all.insert(it.key());
     }
     for (auto it = objects.constBegin(); it != objects.constEnd(); ++it) {
@@ -113,6 +122,9 @@ void ResourceAliasEditor::loadFromMaps(const QHash<quint64, QString>& resources,
         if (monsters.contains(id)) {
             name = monsters.value(id);
             cat = catMonster();
+        } else if (players.contains(id)) {
+            name = players.value(id);
+            cat = catPlayer();
         } else if (objects.contains(id)) {
             name = objects.value(id);
             cat = catObject();
@@ -129,8 +141,16 @@ void ResourceAliasEditor::loadFromMaps(const QHash<quint64, QString>& resources,
         auto* cb = new QComboBox;
         cb->addItem(catResource());
         cb->addItem(catMonster());
+        cb->addItem(catPlayer());
         cb->addItem(catObject());
-        const int ix = cat == catMonster() ? 1 : (cat == catObject() ? 2 : 0);
+        int ix = 0;
+        if (cat == catMonster()) {
+            ix = 1;
+        } else if (cat == catPlayer()) {
+            ix = 2;
+        } else if (cat == catObject()) {
+            ix = 3;
+        }
         cb->setCurrentIndex(ix);
         table_->setCellWidget(row, 2, cb);
         table_->setItem(row, 3, new QTableWidgetItem(note));
@@ -139,14 +159,16 @@ void ResourceAliasEditor::loadFromMaps(const QHash<quint64, QString>& resources,
 
 void ResourceAliasEditor::applyToMaps(QHash<quint64, QString>* resources,
                                       QHash<quint64, QString>* monsters,
+                                      QHash<quint64, QString>* players,
                                       QHash<quint64, QString>* objects,
                                       QHash<quint64, QString>* notes) const
 {
-    if (resources == nullptr || monsters == nullptr || objects == nullptr || notes == nullptr) {
+    if (resources == nullptr || monsters == nullptr || players == nullptr || objects == nullptr || notes == nullptr) {
         return;
     }
     resources->clear();
     monsters->clear();
+    players->clear();
     objects->clear();
     notes->clear();
 
@@ -173,6 +195,10 @@ void ResourceAliasEditor::applyToMaps(QHash<quint64, QString>* resources,
         if (cat == catMonster()) {
             if (!name.isEmpty()) {
                 (*monsters)[id] = name;
+            }
+        } else if (cat == catPlayer()) {
+            if (!name.isEmpty()) {
+                (*players)[id] = name;
             }
         } else if (cat == catObject()) {
             if (!name.isEmpty()) {

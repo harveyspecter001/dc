@@ -28,6 +28,24 @@ enum class PacketKind {
     JrrCommandResponse,
     IspSync,
     ItvInteraction,
+    /// Cliente ↔ servidor durante transición entre mapas (clic norte/sur…) — rutas vistas en dumps.
+    IsaPingClient,
+    ItrMapTransitClient,
+    IshMapTinyServer,
+    ItoMapTransitClient,
+    /// Servidor ~106 B típ.: iue+iuc+knw en el mismo mensaje (contexto/coords mapa).
+    MapHydrateTripleServer,
+    /// Cliente ~88 B: mismo payload combina «jnr» e «isp» (paso de mapa característico).
+    MapHopJnrIspClient,
+    /// Carga voluminosa servidor (tiles / binario mapa típ.).
+    ItxMapHeavyServer,
+    KtaKeyedServer,
+    JsaPulseClient,
+    JsbPulseServer,
+    /// Rutas vistas al farmear / tocar recurso en mapa (sin ISO tipico).
+    MapGatherIerSnapshotServer,
+    MapGatherIevTapClient,
+    MapGatherIeuBundleServer,
 };
 
 /// Regla `min-max:Etiqueta` o `min-max:Etiqueta:categoria` (categoría: recurso | monstruo | objeto).
@@ -96,6 +114,15 @@ void guessCharacterFromServerPayload(const QByteArray& payload, int packetIndex,
 [[nodiscard]] QString formatVarintsPreview(const QList<quint64>& v, int maxCount = 3);
 
 [[nodiscard]] QString formatHexDumpWireshark(const QByteArray& data, int maxBytes = 256);
+
+struct IrxVarintBuckets {
+    QList<quint64> monsters;  // típico ≥ 1M
+    QList<quint64> players;   // típico 1k–9k
+    QList<quint64> structure; // típico < 1k
+    QList<quint64> other;
+};
+
+[[nodiscard]] IrxVarintBuckets classifyIrxStyleVarints(const QList<quint64>& rawIds);
 
 /// Agrupa varints típicos en IRX (monstruos vs jugadores vs otros).
 [[nodiscard]] QString analyzeIrxStyleVarintBuckets(const QList<quint64>& numericIds);

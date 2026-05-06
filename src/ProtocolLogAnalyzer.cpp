@@ -71,12 +71,94 @@ void scanAllVarints(const QByteArray& d, QList<quint64>* out)
 
 } // namespace
 
-PacketKind classifyPacketKind(const QByteArray& payload)
+static bool ankamaUrlSuffixInList(const QStringList& urls, QLatin1String sufWithSlash)
 {
-    if (payload.isEmpty()) {
-        return PacketKind::Unknown;
+    for (const QString& u : urls) {
+        if (u.endsWith(sufWithSlash, Qt::CaseInsensitive)) {
+            return true;
+        }
     }
-    // Orden: rutas type.ankama.com/* (cada token de ruta es distinto: /iri, /irl, /iso, …)
+    return false;
+}
+
+static bool utf16LeContainsLatin1(const QByteArray& p, QLatin1String ascii)
+{
+    QByteArray needle;
+    needle.reserve(ascii.size() * 2);
+    const QByteArray a = QByteArray(ascii);
+    for (int i = 0; i < a.size(); ++i) {
+        needle.append(static_cast<char>(static_cast<unsigned char>(a.at(i))));
+        needle.append(char(0));
+    }
+    return p.contains(needle);
+}
+
+static void mergeAnkamaTypeUrlStrings(const QByteArray& payload, QStringList* out)
+{
+    if (out == nullptr) {
+        return;
+    }
+    extractAnkamaTypeUrls(payload, out);
+    static const QRegularExpression re(QStringLiteral(R"(type\.ankama\.com/[a-z]+)"));
+    const QString latin = QString::fromLatin1(payload);
+    for (auto it = re.globalMatch(latin); it.hasNext();) {
+        const QString cap = it.next().captured(0);
+        if (!out->contains(cap)) {
+            out->append(cap);
+        }
+    }
+}
+
+static PacketKind kindFromUrlListPriority(const QStringList& urls)
+{
+    static const QVector<QPair<QString, PacketKind>> order = {
+        qMakePair(QStringLiteral("iri"), PacketKind::IriMovement),
+        qMakePair(QStringLiteral("iee"), PacketKind::IeeHarvest),
+        qMakePair(QStringLiteral("irl"), PacketKind::IrlList),
+        qMakePair(QStringLiteral("iso"), PacketKind::IsoResources),
+        qMakePair(QStringLiteral("irx"), PacketKind::IrxMonsters),
+        qMakePair(QStringLiteral("idr"), PacketKind::IdrItemReceived),
+        qMakePair(QStringLiteral("idy"), PacketKind::IdyItemDisplayed),
+        qMakePair(QStringLiteral("idw"), PacketKind::IdwItemVanished),
+        qMakePair(QStringLiteral("isl"), PacketKind::IslEntities),
+        qMakePair(QStringLiteral("isu"), PacketKind::IsuClientSync),
+        qMakePair(QStringLiteral("irk"), PacketKind::IrkSyncResponse),
+        qMakePair(QStringLiteral("isa"), PacketKind::IsaPingClient),
+        qMakePair(QStringLiteral("itr"), PacketKind::ItrMapTransitClient),
+        qMakePair(QStringLiteral("ish"), PacketKind::IshMapTinyServer),
+        qMakePair(QStringLiteral("ito"), PacketKind::ItoMapTransitClient),
+        qMakePair(QStringLiteral("iue"), PacketKind::MapHydrateTripleServer),
+        qMakePair(QStringLiteral("iuc"), PacketKind::MapHydrateTripleServer),
+        qMakePair(QStringLiteral("knw"), PacketKind::MapHydrateTripleServer),
+        qMakePair(QStringLiteral("jsa"), PacketKind::JsaPulseClient),
+        qMakePair(QStringLiteral("jsb"), PacketKind::JsbPulseServer),
+        qMakePair(QStringLiteral("itx"), PacketKind::ItxMapHeavyServer),
+        qMakePair(QStringLiteral("kta"), PacketKind::KtaKeyedServer),
+        qMakePair(QStringLiteral("ier"), PacketKind::MapGatherIerSnapshotServer),
+        qMakePair(QStringLiteral("iev"), PacketKind::MapGatherIevTapClient),
+        qMakePair(QStringLiteral("ieu"), PacketKind::MapGatherIeuBundleServer),
+        qMakePair(QStringLiteral("iet"), PacketKind::MapGatherIeuBundleServer),
+        qMakePair(QStringLiteral("ies"), PacketKind::MapGatherIeuBundleServer),
+        qMakePair(QStringLiteral("isp"), PacketKind::IspSync),
+        qMakePair(QStringLiteral("itv"), PacketKind::ItvInteraction),
+        qMakePair(QStringLiteral("kj"), PacketKind::KjCompression),
+        qMakePair(QStringLiteral("jmw"), PacketKind::JmwMonsterCmd),
+        qMakePair(QStringLiteral("jrt"), PacketKind::CommandData),
+        qMakePair(QStringLiteral("jrr"), PacketKind::JrrCommandResponse),
+    };
+    for (const auto& pr : order) {
+        const QString suf = QLatin1Char('/') + pr.first;
+        for (const QString& u : urls) {
+            if (u.endsWith(suf)) {
+                return pr.second;
+            }
+        }
+    }
+    return PacketKind::Unknown;
+}
+
+static PacketKind classifyPacketKindByRawMarkers(const QByteArray& payload)
+{
     if (payload.contains(QByteArrayLiteral("type.ankama.com/iri"))) {
         return PacketKind::IriMovement;
     }
@@ -110,6 +192,50 @@ PacketKind classifyPacketKind(const QByteArray& payload)
     if (payload.contains(QByteArrayLiteral("type.ankama.com/irk"))) {
         return PacketKind::IrkSyncResponse;
     }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/jnr"))
+        && payload.contains(QByteArrayLiteral("type.ankama.com/isp"))) {
+        return PacketKind::MapHopJnrIspClient;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/isa"))) {
+        return PacketKind::IsaPingClient;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/itr"))) {
+        return PacketKind::ItrMapTransitClient;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/ish"))) {
+        return PacketKind::IshMapTinyServer;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/ito"))) {
+        return PacketKind::ItoMapTransitClient;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/iue"))
+        || payload.contains(QByteArrayLiteral("type.ankama.com/iuc"))
+        || payload.contains(QByteArrayLiteral("type.ankama.com/knw"))) {
+        return PacketKind::MapHydrateTripleServer;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/jsa"))) {
+        return PacketKind::JsaPulseClient;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/jsb"))) {
+        return PacketKind::JsbPulseServer;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/itx"))) {
+        return PacketKind::ItxMapHeavyServer;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/kta"))) {
+        return PacketKind::KtaKeyedServer;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/ier"))) {
+        return PacketKind::MapGatherIerSnapshotServer;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/iev"))) {
+        return PacketKind::MapGatherIevTapClient;
+    }
+    if (payload.contains(QByteArrayLiteral("type.ankama.com/ieu"))
+        || payload.contains(QByteArrayLiteral("type.ankama.com/iet"))
+        || payload.contains(QByteArrayLiteral("type.ankama.com/ies"))) {
+        return PacketKind::MapGatherIeuBundleServer;
+    }
     if (payload.contains(QByteArrayLiteral("type.ankama.com/isp"))) {
         return PacketKind::IspSync;
     }
@@ -131,6 +257,39 @@ PacketKind classifyPacketKind(const QByteArray& payload)
     return PacketKind::DataGeneric;
 }
 
+PacketKind classifyPacketKind(const QByteArray& payload)
+{
+    if (payload.isEmpty()) {
+        return PacketKind::Unknown;
+    }
+
+    QStringList urls;
+    mergeAnkamaTypeUrlStrings(payload, &urls);
+    if (ankamaUrlSuffixInList(urls, QLatin1String("/jnr"))
+        && ankamaUrlSuffixInList(urls, QLatin1String("/isp"))) {
+        return PacketKind::MapHopJnrIspClient;
+    }
+    const PacketKind fromUrls = kindFromUrlListPriority(urls);
+    if (fromUrls != PacketKind::Unknown) {
+        return fromUrls;
+    }
+
+    // IRI en borde de mapa: a veces la URL va en UTF-16 LE o fragmentada sin match UTF-8 contiguo.
+    if (utf16LeContainsLatin1(payload, QLatin1String("type.ankama.com/iri"))
+        || utf16LeContainsLatin1(payload, QLatin1String("ankama.com/iri"))) {
+        return PacketKind::IriMovement;
+    }
+    if (payload.contains(QByteArrayLiteral("ankama.com/iri"))) {
+        return PacketKind::IriMovement;
+    }
+
+    const PacketKind raw = classifyPacketKindByRawMarkers(payload);
+    if (raw != PacketKind::DataGeneric) {
+        return raw;
+    }
+    return PacketKind::DataGeneric;
+}
+
 QString packetKindDisplayString(PacketKind k)
 {
     switch (k) {
@@ -140,6 +299,12 @@ QString packetKindDisplayString(PacketKind k)
         return QStringLiteral("IRL (LISTA)");
     case PacketKind::IsoResources:
         return QStringLiteral("ISO (RECURSOS)");
+    case PacketKind::MapGatherIerSnapshotServer:
+        return QStringLiteral("RECO · IER SNAPSHOT");
+    case PacketKind::MapGatherIevTapClient:
+        return QStringLiteral("RECO · IEV TOQUE");
+    case PacketKind::MapGatherIeuBundleServer:
+        return QStringLiteral("RECO · IEU/IET/IES");
     case PacketKind::IrxMonsters:
         return QStringLiteral("IRX (MONSTRUOS)");
     case PacketKind::IslEntities:
@@ -167,7 +332,27 @@ QString packetKindDisplayString(PacketKind k)
     case PacketKind::IspSync:
         return QStringLiteral("ISP (SINCRONIZACIÓN?)");
     case PacketKind::ItvInteraction:
-        return QStringLiteral("ITV (INTERACCIÓN?)");
+        return QStringLiteral("ITV (INFO TRANSFER)");
+    case PacketKind::IsaPingClient:
+        return QStringLiteral("ISA (SESION/MAPA)");
+    case PacketKind::ItrMapTransitClient:
+        return QStringLiteral("ITR (TRAMO MAPA · C→S)");
+    case PacketKind::IshMapTinyServer:
+        return QStringLiteral("ISH (TRAMO MAPA · S→C)");
+    case PacketKind::ItoMapTransitClient:
+        return QStringLiteral("ITO (TRAMO MAPA · C→S)");
+    case PacketKind::MapHydrateTripleServer:
+        return QStringLiteral("MAPA · HIDRATA (IUE/IUC/KNW)");
+    case PacketKind::MapHopJnrIspClient:
+        return QStringLiteral("PASO MAPA (JNR+ISP)");
+    case PacketKind::ItxMapHeavyServer:
+        return QStringLiteral("ITX (MAPA · CARGA)");
+    case PacketKind::KtaKeyedServer:
+        return QStringLiteral("KTA (MAPA · CLAVE)");
+    case PacketKind::JsaPulseClient:
+        return QStringLiteral("JSA (PULSO · C→S)");
+    case PacketKind::JsbPulseServer:
+        return QStringLiteral("JSB (PULSO · S→C)");
     case PacketKind::DataGeneric:
         return QStringLiteral("DATOS");
     default:
@@ -182,6 +367,9 @@ PacketKind packetKindFromDisplayLabel(const QString& label)
         {QStringLiteral("IRI (MOVIMIENTO)"), PacketKind::IriMovement},
         {QStringLiteral("IRL (LISTA)"), PacketKind::IrlList},
         {QStringLiteral("ISO (RECURSOS)"), PacketKind::IsoResources},
+        {QStringLiteral("RECO · IER SNAPSHOT"), PacketKind::MapGatherIerSnapshotServer},
+        {QStringLiteral("RECO · IEV TOQUE"), PacketKind::MapGatherIevTapClient},
+        {QStringLiteral("RECO · IEU/IET/IES"), PacketKind::MapGatherIeuBundleServer},
         {QStringLiteral("IRX (MONSTRUOS)"), PacketKind::IrxMonsters},
         {QStringLiteral("ISL (ENTIDADES)"), PacketKind::IslEntities},
         {QStringLiteral("ISL (LISTA)"), PacketKind::IslEntities},
@@ -198,7 +386,18 @@ PacketKind packetKindFromDisplayLabel(const QString& label)
         {QStringLiteral("COMANDO / jrt"), PacketKind::CommandData},
         {QStringLiteral("JRR (RESPUESTA COMANDO)"), PacketKind::JrrCommandResponse},
         {QStringLiteral("ISP (SINCRONIZACIÓN?)"), PacketKind::IspSync},
+        {QStringLiteral("ITV (INFO TRANSFER)"), PacketKind::ItvInteraction},
         {QStringLiteral("ITV (INTERACCIÓN?)"), PacketKind::ItvInteraction},
+        {QStringLiteral("PASO MAPA (JNR+ISP)"), PacketKind::MapHopJnrIspClient},
+        {QStringLiteral("ISA (SESION/MAPA)"), PacketKind::IsaPingClient},
+        {QStringLiteral("ITR (TRAMO MAPA · C→S)"), PacketKind::ItrMapTransitClient},
+        {QStringLiteral("ISH (TRAMO MAPA · S→C)"), PacketKind::IshMapTinyServer},
+        {QStringLiteral("ITO (TRAMO MAPA · C→S)"), PacketKind::ItoMapTransitClient},
+        {QStringLiteral("MAPA · HIDRATA (IUE/IUC/KNW)"), PacketKind::MapHydrateTripleServer},
+        {QStringLiteral("ITX (MAPA · CARGA)"), PacketKind::ItxMapHeavyServer},
+        {QStringLiteral("KTA (MAPA · CLAVE)"), PacketKind::KtaKeyedServer},
+        {QStringLiteral("JSA (PULSO · C→S)"), PacketKind::JsaPulseClient},
+        {QStringLiteral("JSB (PULSO · S→C)"), PacketKind::JsbPulseServer},
         {QStringLiteral("DATOS"), PacketKind::DataGeneric},
         {QStringLiteral("OTRO"), PacketKind::Unknown},
     };
@@ -213,11 +412,15 @@ PacketKind packetKindFromDisplayLabel(const QString& label)
 QStringList standardPacketKindLabels()
 {
     QStringList out;
-    out.reserve(32);
+    out.reserve(48);
     const QList<PacketKind> kinds = {
         PacketKind::IriMovement,
+        PacketKind::MapHopJnrIspClient,
         PacketKind::IeeHarvest,
         PacketKind::IsoResources,
+        PacketKind::MapGatherIerSnapshotServer,
+        PacketKind::MapGatherIevTapClient,
+        PacketKind::MapGatherIeuBundleServer,
         PacketKind::IrxMonsters,
         PacketKind::IrlList,
         PacketKind::IdrItemReceived,
@@ -226,6 +429,15 @@ QStringList standardPacketKindLabels()
         PacketKind::IslEntities,
         PacketKind::IsuClientSync,
         PacketKind::IrkSyncResponse,
+        PacketKind::IsaPingClient,
+        PacketKind::ItrMapTransitClient,
+        PacketKind::IshMapTinyServer,
+        PacketKind::ItoMapTransitClient,
+        PacketKind::MapHydrateTripleServer,
+        PacketKind::ItxMapHeavyServer,
+        PacketKind::KtaKeyedServer,
+        PacketKind::JsaPulseClient,
+        PacketKind::JsbPulseServer,
         PacketKind::KjCompression,
         PacketKind::JmwMonsterCmd,
         PacketKind::CommandData,
@@ -359,7 +571,12 @@ quint64 guessMapIdHeuristic(const QByteArray& payload)
     QList<quint64> all;
     scanAllVarints(payload, &all);
     for (quint64 v : all) {
-        if (v >= 100000ULL && v <= 99999999ULL) {
+        // No tomar IDs de recurso conocidos (~513xxx) como mapa — si no, cada RECO cambia «mapa» y la UI
+        // nunca limpia candidatos al zarpar de verdad (parece histórico acumulado).
+        if (v >= 512000ULL && v <= 519999ULL) {
+            continue;
+        }
+        if (v >= 100000ULL && v <= 2000000000ULL) {
             return v;
         }
     }
@@ -464,29 +681,30 @@ QString formatHexDumpWireshark(const QByteArray& data, int maxBytes)
     return out;
 }
 
-QString analyzeIrxStyleVarintBuckets(const QList<quint64>& rawIds)
+IrxVarintBuckets classifyIrxStyleVarints(const QList<quint64>& rawIds)
 {
     QList<quint64> uniq = rawIds;
     std::sort(uniq.begin(), uniq.end());
     uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
 
-    QList<quint64> monsterIds;
-    QList<quint64> playerIds;
-    QList<quint64> structureIds;
-    QList<quint64> otherIds;
-
+    IrxVarintBuckets b;
     for (quint64 id : uniq) {
         if (id >= 1000000ULL) {
-            monsterIds.append(id);
+            b.monsters.append(id);
         } else if (id >= 1000ULL && id <= 9999ULL) {
-            playerIds.append(id);
+            b.players.append(id);
         } else if (id > 0 && id < 1000ULL) {
-            structureIds.append(id);
+            b.structure.append(id);
         } else {
-            otherIds.append(id);
+            b.other.append(id);
         }
     }
+    return b;
+}
 
+QString analyzeIrxStyleVarintBuckets(const QList<quint64>& rawIds)
+{
+    const IrxVarintBuckets buck = classifyIrxStyleVarints(rawIds);
     QString result;
     auto appendBlock = [&](const QString& title, const QList<quint64>& lst) {
         if (lst.isEmpty()) {
@@ -499,16 +717,16 @@ QString analyzeIrxStyleVarintBuckets(const QList<quint64>& rawIds)
         result += QLatin1Char('\n');
     };
 
-    appendBlock(QStringLiteral("MONSTRUOS / criaturas (IDs ≥ 1.000.000):\n"), monsterIds);
-    appendBlock(QStringLiteral("PERSONAJES / jugadores típicos (IDs 1.000–9.999):\n"), playerIds);
-    if (!playerIds.isEmpty()) {
+    appendBlock(QStringLiteral("MONSTRUOS / criaturas (IDs ≥ 1.000.000):\n"), buck.monsters);
+    appendBlock(QStringLiteral("PERSONAJES / jugadores típicos (IDs 1.000–9.999):\n"), buck.players);
+    if (!buck.players.isEmpty()) {
         result += QStringLiteral(
             "   (No son monstruos del mapa; suelen ser IDs de jugador u otras entidades.)\n\n");
     }
-    appendBlock(QStringLiteral("IDs pequeños — posible estructura interna (< 1.000):\n"), structureIds);
-    if (!otherIds.isEmpty()) {
+    appendBlock(QStringLiteral("IDs pequeños — posible estructura interna (< 1.000):\n"), buck.structure);
+    if (!buck.other.isEmpty()) {
         result += QStringLiteral("Otros IDs:\n");
-        for (quint64 id : otherIds) {
+        for (quint64 id : buck.other) {
             result += QStringLiteral("   • %1\n").arg(id);
         }
         result += QLatin1Char('\n');
@@ -531,6 +749,7 @@ QString buildPacketAnalysisText(const ProtocolPacketRecord& rec, const QVector<I
 
     QStringList recursoLines;
     QStringList monstroLines;
+    QStringList personajeLines;
     QStringList objetoLines;
     QStringList otrosLines;
 
@@ -548,6 +767,8 @@ QString buildPacketAnalysisText(const ProtocolPacketRecord& rec, const QVector<I
             otrosLines << QStringLiteral("   • ID %1 (sin alias)").arg(id);
         } else if (cat == QStringLiteral("monstruo")) {
             monstroLines << line;
+        } else if (cat == QStringLiteral("personaje")) {
+            personajeLines << line;
         } else if (cat == QStringLiteral("objeto")) {
             objetoLines << line;
         } else {
@@ -575,6 +796,13 @@ QString buildPacketAnalysisText(const ProtocolPacketRecord& rec, const QVector<I
     if (!monstroLines.isEmpty()) {
         t += QStringLiteral("MONSTRUOS (aliases, %1):\n").arg(monstroLines.size());
         for (const QString& l : monstroLines) {
+            t += l + QLatin1Char('\n');
+        }
+        t += QLatin1Char('\n');
+    }
+    if (!personajeLines.isEmpty()) {
+        t += QStringLiteral("PERSONAJES / jugadores (aliases, %1):\n").arg(personajeLines.size());
+        for (const QString& l : personajeLines) {
             t += l + QLatin1Char('\n');
         }
         t += QLatin1Char('\n');

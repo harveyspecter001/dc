@@ -32,8 +32,11 @@ void IdDatabase::clear()
 {
     resources_.clear();
     monsters_.clear();
+    players_.clear();
     objects_.clear();
     customNotes_.clear();
+    resourceCaptureHex_.clear();
+    monsterCaptureHex_.clear();
 }
 
 QString IdDatabase::defaultStoragePath()
@@ -69,8 +72,11 @@ bool IdDatabase::loadFromFile(const QString& path, QString* errorOut)
     const QJsonObject root = doc.object();
     insertJsonObjectIntoMap(root.value(QStringLiteral("resource_overrides")).toObject(), &resources_);
     insertJsonObjectIntoMap(root.value(QStringLiteral("monster_names")).toObject(), &monsters_);
+    insertJsonObjectIntoMap(root.value(QStringLiteral("player_names")).toObject(), &players_);
     insertJsonObjectIntoMap(root.value(QStringLiteral("object_names")).toObject(), &objects_);
     insertJsonObjectIntoMap(root.value(QStringLiteral("custom_notes")).toObject(), &customNotes_);
+    insertJsonObjectIntoMap(root.value(QStringLiteral("resource_capture_hex")).toObject(), &resourceCaptureHex_);
+    insertJsonObjectIntoMap(root.value(QStringLiteral("monster_capture_hex")).toObject(), &monsterCaptureHex_);
     return true;
 }
 
@@ -96,6 +102,13 @@ bool IdDatabase::saveToFile(const QString& path, QString* errorOut) const
     }
     {
         QJsonObject o;
+        for (auto it = players_.constBegin(); it != players_.constEnd(); ++it) {
+            o.insert(QString::number(it.key()), it.value());
+        }
+        root.insert(QStringLiteral("player_names"), o);
+    }
+    {
+        QJsonObject o;
         for (auto it = objects_.constBegin(); it != objects_.constEnd(); ++it) {
             o.insert(QString::number(it.key()), it.value());
         }
@@ -107,6 +120,20 @@ bool IdDatabase::saveToFile(const QString& path, QString* errorOut) const
             o.insert(QString::number(it.key()), it.value());
         }
         root.insert(QStringLiteral("custom_notes"), o);
+    }
+    {
+        QJsonObject o;
+        for (auto it = resourceCaptureHex_.constBegin(); it != resourceCaptureHex_.constEnd(); ++it) {
+            o.insert(QString::number(it.key()), it.value());
+        }
+        root.insert(QStringLiteral("resource_capture_hex"), o);
+    }
+    {
+        QJsonObject o;
+        for (auto it = monsterCaptureHex_.constBegin(); it != monsterCaptureHex_.constEnd(); ++it) {
+            o.insert(QString::number(it.key()), it.value());
+        }
+        root.insert(QStringLiteral("monster_capture_hex"), o);
     }
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
@@ -134,6 +161,7 @@ QVector<IdRangeRule> IdDatabase::toRangeRules() const
     };
     add(resources_, QStringLiteral("recurso"));
     add(monsters_, QStringLiteral("monstruo"));
+    add(players_, QStringLiteral("personaje"));
     add(objects_, QStringLiteral("objeto"));
     return out;
 }

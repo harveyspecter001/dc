@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "ResourceAliasEditor.h"
+#include "ResourcePredictor.h"
 #include "DebugCentralLog.h"
 #include "DiagnosticsLogWindow.h"
 #include "TcpMitmProxy.h"
@@ -22,6 +23,7 @@
 #include <QCloseEvent>
 #include <QDesktopServices>
 #include <QCoreApplication>
+#include <QCursor>
 #include <QDateTime>
 #include <QUrl>
 #include <QDir>
@@ -66,6 +68,8 @@
 #include <algorithm>
 #include <QTimer>
 #include <QGroupBox>
+#include <QMenu>
+#include <QAction>
 #include <QMenuBar>
 #include <QAbstractSocket>
 #include <QHostAddress>
@@ -79,19 +83,140 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QMenu>
 #include <QMimeData>
+#include <QItemSelectionModel>
 #include <QSplitter>
-#include <QUrl>
 #include <QSpinBox>
 #include <QSettings>
 #include <QTextStream>
+#include <QStringConverter>
+#include <QRegularExpression>
 
 #include <functional>
 
 namespace {
 constexpr quint16 kUpstreamDefaultPort = 5555;
 constexpr int kProtoVecRole = Qt::UserRole + 48;
+/// Fila en la tabla de candidatos: 0 candidato vivo, 1 recurso en BD, 2 monstruo en BD (solo depuración UI).
+constexpr int kCandTableRowKindRole = Qt::UserRole + 60;
+constexpr int kRowKindCandidate = 0;
+
+[[nodiscard]] bool packetKindUpdatesMapGuess(PacketKind k)
+{
+    switch (k) {
+    case PacketKind::IsoResources:
+    case PacketKind::ItxMapHeavyServer:
+    case PacketKind::MapHydrateTripleServer:
+    case PacketKind::MapHopJnrIspClient:
+        return true;
+    default:
+        return false;
+    }
+}
+
+[[nodiscard]] QString protocolTreeKindColumnText(const ProtocolPacketRecord& r)
+{
+    QString t = r.kindLabel;
+    switch (r.kind) {
+    case PacketKind::MapGatherIerSnapshotServer:
+    case PacketKind::MapGatherIevTapClient:
+    case PacketKind::MapGatherIeuBundleServer:
+    case PacketKind::ItvInteraction:
+    case PacketKind::IeeHarvest:
+        return QStringLiteral("🎯 %1").arg(t);
+    default:
+        return t;
+    }
+}
+
+[[nodiscard]] bool detailPanelHighlightsInteraction(const ProtocolPacketRecord& rec)
+{
+    switch (rec.kind) {
+    case PacketKind::MapGatherIerSnapshotServer:
+    case PacketKind::MapGatherIevTapClient:
+    case PacketKind::MapGatherIeuBundleServer:
+    case PacketKind::ItvInteraction:
+    case PacketKind::IeeHarvest:
+        return true;
+    default:
+        return false;
+    }
+}
+
+[[nodiscard]] bool packetKindMatchesFilterCombo(PacketKind k, int fil)
+{
+    if (fil <= 0) {
+        return true;
+    }
+    switch (fil) {
+    case 1:
+        return k == PacketKind::IriMovement;
+    case 2:
+        return k == PacketKind::IrlList;
+    case 3:
+        return k == PacketKind::IsoResources;
+    case 4:
+        return k == PacketKind::IrxMonsters;
+    case 5:
+        return k == PacketKind::IslEntities;
+    case 6:
+        return k == PacketKind::CommandData;
+    case 7:
+        return k == PacketKind::DataGeneric;
+    case 8:
+        return k == PacketKind::Unknown;
+    case 9:
+        return k == PacketKind::IeeHarvest;
+    case 10:
+        return k == PacketKind::IdrItemReceived;
+    case 11:
+        return k == PacketKind::IdyItemDisplayed;
+    case 12:
+        return k == PacketKind::IdwItemVanished;
+    case 13:
+        return k == PacketKind::IsuClientSync;
+    case 14:
+        return k == PacketKind::IrkSyncResponse;
+    case 15:
+        return k == PacketKind::IspSync;
+    case 16:
+        return k == PacketKind::ItvInteraction;
+    case 17:
+        return k == PacketKind::KjCompression;
+    case 18:
+        return k == PacketKind::JmwMonsterCmd;
+    case 19:
+        return k == PacketKind::JrrCommandResponse;
+    case 20:
+        return k == PacketKind::MapHopJnrIspClient;
+    case 21:
+        return k == PacketKind::IsaPingClient;
+    case 22:
+        return k == PacketKind::ItrMapTransitClient;
+    case 23:
+        return k == PacketKind::IshMapTinyServer;
+    case 24:
+        return k == PacketKind::ItoMapTransitClient;
+    case 25:
+        return k == PacketKind::MapHydrateTripleServer;
+    case 26:
+        return k == PacketKind::ItxMapHeavyServer;
+    case 27:
+        return k == PacketKind::KtaKeyedServer;
+    case 28:
+        return k == PacketKind::JsaPulseClient;
+    case 29:
+        return k == PacketKind::JsbPulseServer;
+    case 30:
+        return k == PacketKind::MapGatherIerSnapshotServer;
+    case 31:
+        return k == PacketKind::MapGatherIevTapClient;
+    case 32:
+        return k == PacketKind::MapGatherIeuBundleServer;
+    default:
+        return true;
+    }
+}
 
 class LogsDropFrame final : public QFrame {
 public:
@@ -392,6 +517,36 @@ MainWindow::MainWindow(QWidget* parent)
     arrowLay->addWidget(arrowE_btn_, 1, 1);
     pmLay->addLayout(arrowLay);
 
+    pmLay->addWidget(new QLabel(QStringLiteral(
+        "<b>Cambio de mapa</b> — macro C→S (ITR · ITO · PASO MAPA con JNR+ISP). «☆iri» sigue solo para "
+        "<code>/iri</code> en casillas.")));
+    {
+        auto* macroRow = new QHBoxLayout;
+        saveMapTransitMacroBtn_ = new QPushButton(QStringLiteral("💾 Guardar macro (selección en Logs…)"));
+        saveMapTransitMacroBtn_->setToolTip(QStringLiteral(
+            "En Logs, Ctrl+clic en varios paquetes cliente: ITR, ITO y/o PASO MAPA (JNR+ISP). Se ordenan por #."));
+        replayMapTransitMacroBtn_ = new QPushButton(QStringLiteral("▶️ Reproducir macro…"));
+        replayMapTransitMacroBtn_->setToolTip(QStringLiteral(
+            "Carga JSON (p. ej. map_transition_macro.json) e inyecta cada paso hacia el servidor con pausa."));
+        macroRow->addWidget(saveMapTransitMacroBtn_);
+        macroRow->addWidget(replayMapTransitMacroBtn_);
+        macroRow->addWidget(new QLabel(QStringLiteral("Espera:")));
+        mapTransitMacroDelaySpin_ = new QSpinBox;
+        mapTransitMacroDelaySpin_->setRange(0, 5000);
+        mapTransitMacroDelaySpin_->setSingleStep(50);
+        mapTransitMacroDelaySpin_->setValue(250);
+        mapTransitMacroDelaySpin_->setSuffix(QStringLiteral(" ms"));
+        macroRow->addWidget(mapTransitMacroDelaySpin_);
+        macroRow->addStretch(1);
+        pmLay->addLayout(macroRow);
+        pmLay->addWidget(new QLabel(QStringLiteral(
+            "<span style=\"color:#cbd5e1;font-size:11px;\">Las respuestas del servidor (ISH, hidrato, etc.) no se "
+            "inyectan — deben llegar vivas tras cada paso. Si falla, aumentá el tiempo entre pasos o grabá macro en la "
+            "misma sesión.</span>")));
+        connect(saveMapTransitMacroBtn_, &QPushButton::clicked, this, &MainWindow::saveMapTransitMacroFromSelection);
+        connect(replayMapTransitMacroBtn_, &QPushButton::clicked, this, &MainWindow::replayMapTransitMacroFromDialog);
+    }
+
     upstreamQuickLbl_ = new QLabel(QStringLiteral("Upstream: [Detectando...]"));
     upstreamQuickLbl_->setWordWrap(true);
     upstreamQuickLbl_->setStyleSheet(QStringLiteral("color:#93c5fd;font-size:12px;"));
@@ -461,23 +616,82 @@ MainWindow::MainWindow(QWidget* parent)
         monstersMapLbl_->setWordWrap(true);
         monstersMapLbl_->setStyleSheet(QStringLiteral("color:#fca5a5;font-size:13px;"));
         v->addWidget(monstersMapLbl_);
-        resourcesTable_ = new QTableWidget(4, 3);
-        resourcesTable_->setHorizontalHeaderLabels(
-            {QStringLiteral("Recurso"), QStringLiteral("ID"), QStringLiteral("Cantidad (si aplica)")});
-        const QStringList rnames = {QStringLiteral("Trigo"), QStringLiteral("Ortiga"), QStringLiteral("Castaño"),
-                                    QStringLiteral("Fresno")};
-        for (int i = 0; i < 4; ++i) {
-            resourcesTable_->setItem(i, 0, new QTableWidgetItem(rnames.at(i)));
-            resourcesTable_->setItem(i, 1, new QTableWidgetItem(QStringLiteral("—")));
-            resourcesTable_->setItem(i, 2, new QTableWidgetItem(QStringLiteral("—")));
+        isoMapSummarySectionTitleLbl_ =
+            new QLabel(QStringLiteral("<b>🌾 Recursos detectados en el mapa actual (ISO)</b> "
+                                      "— rangos conocidos + <code>ids_database.json</code>."));
+        isoMapSummarySectionTitleLbl_->setWordWrap(true);
+        v->addWidget(isoMapSummarySectionTitleLbl_);
+        resourcesMapSummary_ = new QTextBrowser;
+        resourcesMapSummary_->setReadOnly(true);
+        resourcesMapSummary_->setOpenExternalLinks(false);
+        resourcesMapSummary_->setMinimumHeight(120);
+        resourcesMapSummary_->setMaximumHeight(260);
+        resourcesMapSummary_->setStyleSheet(QStringLiteral(
+            "QTextBrowser{background:#121212;color:#e5e7eb;border:1px solid #333;border-radius:6px;}"));
+        v->addWidget(resourcesMapSummary_);
+        resourcesMapUpdatedLbl_ = new QLabel(QStringLiteral("Última actualización desde ISO: —"));
+        resourcesMapUpdatedLbl_->setStyleSheet(QStringLiteral("color:#94a3af;font-size:12px;"));
+        v->addWidget(resourcesMapUpdatedLbl_);
+        resourceIsoSessionSubtitleLbl_ =
+            new QLabel(QStringLiteral("<b>Sesión</b> — últimos repasos ISO (solo texto):"));
+        v->addWidget(resourceIsoSessionSubtitleLbl_);
+        resourceSessionHistory_ = new QPlainTextEdit;
+        resourceSessionHistory_->setReadOnly(true);
+        resourceSessionHistory_->setMaximumBlockCount(96);
+        resourceSessionHistory_->setMinimumHeight(100);
+        resourceSessionHistory_->setMaximumHeight(200);
+        {
+            auto rf = resourceSessionHistory_->font();
+            rf.setFamily(QStringLiteral("Consolas"));
+            resourceSessionHistory_->setFont(rf);
         }
-        resourcesTable_->horizontalHeader()->setStretchLastSection(true);
-        resourcesTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        resourcesTable_->setSelectionMode(QAbstractItemView::NoSelection);
-        v->addWidget(resourcesTable_, 1);
-        refreshResourcesBtn_ = new QPushButton(QStringLiteral("Actualizar desde logs"));
-        refreshResourcesBtn_->setToolTip(
-            QStringLiteral("Recalcula la tabla a partir de los paquetes ISO ya analizados en la pestaña «Logs»."));
+        v->addWidget(resourceSessionHistory_);
+        exportResourcesCsvBtn_ = new QPushButton(QStringLiteral("Exportar lista agregada (CSV)"));
+        exportResourcesCsvBtn_->setToolTip(QStringLiteral(
+            "CSV: recurso;cantidad;mapa_actual (útiles para mapeos / bots). Requiere haber pasado ISO con prediction."));
+        connect(exportResourcesCsvBtn_, &QPushButton::clicked, this, &MainWindow::exportGatheredResourcesCsvDialog);
+        v->addWidget(exportResourcesCsvBtn_);
+        isoMapSummarySectionTitleLbl_->setVisible(false);
+        resourcesMapSummary_->setVisible(false);
+        resourcesMapUpdatedLbl_->setVisible(false);
+        resourceIsoSessionSubtitleLbl_->setVisible(false);
+        resourceSessionHistory_->setVisible(false);
+        exportResourcesCsvBtn_->setVisible(false);
+
+        auto* savedHdr = new QLabel(QStringLiteral(
+            "<b>Recursos / monstruos guardados</b> — contenido de <code>ids_database.json</code>. "
+            "Un mismo nombre puede tener múltiples IDs (variantes/cantidades)."));
+        savedHdr->setWordWrap(true);
+        v->addWidget(savedHdr);
+
+        savedResMonTable_ = new QTableWidget(0, 3);
+        savedResMonTable_->setHorizontalHeaderLabels(
+            {QStringLiteral("Tipo"), QStringLiteral("ID"), QStringLiteral("Nombre")});
+        savedResMonTable_->horizontalHeader()->setStretchLastSection(true);
+        savedResMonTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+        savedResMonTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+        savedResMonTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        savedResMonTable_->setMinimumHeight(160);
+        v->addWidget(savedResMonTable_, 1);
+
+        auto* savedRow = new QHBoxLayout;
+        addSavedResourceBtn_ = new QPushButton(QStringLiteral("Agregar recurso…"));
+        addSavedMonsterBtn_ = new QPushButton(QStringLiteral("Agregar monstruo…"));
+        removeSavedEntryBtn_ = new QPushButton(QStringLiteral("Eliminar seleccionado"));
+        savedRow->addWidget(addSavedResourceBtn_);
+        savedRow->addWidget(addSavedMonsterBtn_);
+        savedRow->addWidget(removeSavedEntryBtn_);
+        savedRow->addStretch(1);
+        v->addLayout(savedRow);
+
+        connect(addSavedResourceBtn_, &QPushButton::clicked, this, &MainWindow::addSavedResourceDialog);
+        connect(addSavedMonsterBtn_, &QPushButton::clicked, this, &MainWindow::addSavedMonsterDialog);
+        connect(removeSavedEntryBtn_, &QPushButton::clicked, this, &MainWindow::removeSelectedSavedEntry);
+        refreshSavedResMonUi();
+        refreshResourcesBtn_ = new QPushButton(QStringLiteral("Sincronizar mapa desde Logs"));
+        refreshResourcesBtn_->setToolTip(QStringLiteral(
+            "Sincroniza solo la etiqueta «Mapa actual» desde la cola del log. Los candidatos salen solo de ISO/ITX/IER "
+            "snapshot en vivo, no del histórico completo."));
         connect(refreshResourcesBtn_, &QPushButton::clicked, this, &MainWindow::onRefreshResourcesFromLogsClicked);
         v->addWidget(refreshResourcesBtn_);
         editIdsBtn_ = new QPushButton(QStringLiteral("Editar IDs (ids_database.json)"));
@@ -490,6 +704,67 @@ MainWindow::MainWindow(QWidget* parent)
             QStringLiteral("Editor visual de ids_database.json sin editar JSON a mano."));
         connect(editResourcesGuiBtn_, &QPushButton::clicked, this, &MainWindow::openResourceEditor);
         v->addWidget(editResourcesGuiBtn_);
+
+        auto* candHdr = new QLabel(QStringLiteral(
+            "<b>Candidatos a recurso</b> — solo IDs nuevos desde paquetes <b>ISO / ITX / IER snapshot</b> del "
+            "<b>mapa actual</b> (no crece con cada RECO de farmeo). Interacción = paquetes IEV/IEU al tocar recurso. "
+            "Al guardar se guarda el hex del snapshot en <code>ids_database.json</code>."));
+        candHdr->setWordWrap(true);
+        v->addWidget(candHdr);
+
+        resourceCandidatesHintLbl_ = new QLabel(QStringLiteral("Candidatos: —"));
+        resourceCandidatesHintLbl_->setStyleSheet(QStringLiteral("color:#94a3af;font-size:12px;"));
+        v->addWidget(resourceCandidatesHintLbl_);
+
+        resourceCandidatesTable_ = new QTableWidget(0, 5);
+        resourceCandidatesTable_->setHorizontalHeaderLabels(
+            {QStringLiteral("ID"), QStringLiteral("Nombre sugerido"), QStringLiteral("Como en log"),
+             QStringLiteral("Hex snapshot (truncado)"), QStringLiteral("Interactuado")});
+        resourceCandidatesTable_->horizontalHeader()->setStretchLastSection(true);
+        resourceCandidatesTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+        resourceCandidatesTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+        resourceCandidatesTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        resourceCandidatesTable_->setMinimumHeight(120);
+        v->addWidget(resourceCandidatesTable_);
+
+        auto* candRow = new QHBoxLayout;
+        refreshResourceCandidatesBtn_ = new QPushButton(QStringLiteral("Vaciar candidatos"));
+        refreshResourceCandidatesBtn_->setToolTip(
+            QStringLiteral("Limpia los contadores acumulados en esta sesión (no reescanea el log). Para rellenar desde "
+                          "«Logs» usar «Actualizar desde logs»."));
+        addResourceCandidateBtn_ = new QPushButton(QStringLiteral("Agregar como recurso…"));
+        addResourceCandidateBtn_->setToolTip(QStringLiteral("Guarda el ID seleccionado como recurso en ids_database.json."));
+        hideResourceCandidateBtn_ = new QPushButton(QStringLiteral("Ocultar candidato"));
+        hideResourceCandidateBtn_->setToolTip(QStringLiteral("Quita el ID de la lista (no modifica ids_database.json)."));
+        removeInteractedCandidatesBtn_ = new QPushButton(QStringLiteral("Quitar interactuados"));
+        removeInteractedCandidatesBtn_->setToolTip(
+            QStringLiteral("Elimina de la tabla los IDs marcados como interactuados en este mapa (solo UI)."));
+        candRow->addWidget(refreshResourceCandidatesBtn_);
+        candRow->addWidget(addResourceCandidateBtn_);
+        addMonsterCandidateBtn_ = new QPushButton(QStringLiteral("Agregar como monstruo…"));
+        addMonsterCandidateBtn_->setToolTip(QStringLiteral("Guarda el ID seleccionado como monstruo en ids_database.json."));
+        candRow->addWidget(addMonsterCandidateBtn_);
+        candRow->addWidget(hideResourceCandidateBtn_);
+        candRow->addWidget(removeInteractedCandidatesBtn_);
+        candRow->addStretch(1);
+        v->addLayout(candRow);
+
+        connect(refreshResourceCandidatesBtn_, &QPushButton::clicked, this, [this]() {
+            resourceCandidateHits_.clear();
+            resourceCandidateInteractedHits_.clear();
+            resourceCandidateSeenOnMap_.clear();
+            resourceCandidateSourceHex_.clear();
+            resourceCandidateLastInteractMs_.clear();
+            resourceCandidateIntroLogLabel_.clear();
+            resourceCandidateInteractLogLabel_.clear();
+            refreshResourceCandidatesUi();
+            statusBar()->showMessage(QStringLiteral("Candidatos vaciados (solo sesión en vivo)."), 3500);
+        });
+        connect(addResourceCandidateBtn_, &QPushButton::clicked, this, &MainWindow::addSelectedResourceCandidateAsOverride);
+        connect(addMonsterCandidateBtn_, &QPushButton::clicked, this, &MainWindow::addSelectedResourceCandidateAsMonster);
+        connect(hideResourceCandidateBtn_, &QPushButton::clicked, this, &MainWindow::hideSelectedResourceCandidate);
+        connect(removeInteractedCandidatesBtn_, &QPushButton::clicked, this,
+                &MainWindow::removeInteractedResourceCandidates);
     }
     auto* pageProto = new QWidget;
     {
@@ -497,7 +772,8 @@ MainWindow::MainWindow(QWidget* parent)
         v->setSpacing(8);
         v->setContentsMargins(8, 8, 8, 8);
         v->addWidget(new QLabel(QStringLiteral(
-            "<b>Logs de protocolo</b> — columna seleccionada abre detalle HEX; plantillas ☆iri solo desde paquetes IRI.")));
+            "<b>Logs de protocolo</b> — detalle HEX por paquete; plantillas ☆iri solo IRI. Macro cambio mapa: Ctrl+clic "
+            "ITR/ITO/PASO MAPA → «Guardar macro» en Proxy.")));
         auto* fl = new QHBoxLayout;
         protocolKindFilter_ = new QComboBox;
         protocolKindFilter_->addItem(QStringLiteral("Todos"));
@@ -516,10 +792,23 @@ MainWindow::MainWindow(QWidget* parent)
         protocolKindFilter_->addItem(QStringLiteral("ISU (sync cliente)"));
         protocolKindFilter_->addItem(QStringLiteral("IRK (sync respuesta)"));
         protocolKindFilter_->addItem(QStringLiteral("ISP (sync?)"));
-        protocolKindFilter_->addItem(QStringLiteral("ITV (interacción?)"));
+        protocolKindFilter_->addItem(QStringLiteral("ITV (info transfer)"));
         protocolKindFilter_->addItem(QStringLiteral("KJ (compresión?)"));
         protocolKindFilter_->addItem(QStringLiteral("JMW (comando monstruos)"));
         protocolKindFilter_->addItem(QStringLiteral("JRR (respuesta comando)"));
+        protocolKindFilter_->addItem(QStringLiteral("PASO MAPA (JNR+ISP)"));
+        protocolKindFilter_->addItem(QStringLiteral("ISA (sesión/mapa)"));
+        protocolKindFilter_->addItem(QStringLiteral("ITR (tramo mapa · C→S)"));
+        protocolKindFilter_->addItem(QStringLiteral("ISH (tramo mapa · S→C)"));
+        protocolKindFilter_->addItem(QStringLiteral("ITO (tramo mapa · C→S)"));
+        protocolKindFilter_->addItem(QStringLiteral("MAPA hidrata (IUE/IUC/KNW)"));
+        protocolKindFilter_->addItem(QStringLiteral("ITX (mapa · carga)"));
+        protocolKindFilter_->addItem(QStringLiteral("KTA (mapa · clave)"));
+        protocolKindFilter_->addItem(QStringLiteral("JSA pulso (C→S)"));
+        protocolKindFilter_->addItem(QStringLiteral("JSB pulso (S→C)"));
+        protocolKindFilter_->addItem(QStringLiteral("RECO · IER snapshot"));
+        protocolKindFilter_->addItem(QStringLiteral("RECO · IEV toque"));
+        protocolKindFilter_->addItem(QStringLiteral("RECO · IEU/IET/IES"));
         protocolKindFilter_->setToolTip(QStringLiteral("Filtra por tipo detectado en el payload."));
         connect(protocolKindFilter_, &QComboBox::currentIndexChanged, this, &MainWindow::onProtocolFilterChanged);
         fl->addWidget(protocolKindFilter_);
@@ -542,6 +831,34 @@ MainWindow::MainWindow(QWidget* parent)
         connect(clearProtocolLogBtn_, &QPushButton::clicked, this, &MainWindow::onClearProtocolLogClicked);
         fl->addWidget(clearProtocolLogBtn_);
         v->addLayout(fl);
+
+        auto* fl2 = new QHBoxLayout;
+        protocolPauseTableCaptureChk_ = new QCheckBox(QStringLiteral("Pausar nueva captura en tabla"));
+        protocolPauseTableCaptureChk_->setToolTip(QStringLiteral(
+            "El proxy sigue reenviando tráfico; no se añaden filas al log hasta que desmarcas (la importación desde .txt sigue funcionando)."));
+        protocolMultiKindFilterChk_ = new QCheckBox(QStringLiteral("Varios tipos (elegir…)"));
+        protocolMultiKindFilterChk_->setToolTip(QStringLiteral(
+            "Oculta el filtro del desplegable y deja visibles solo los tipos que marques en «Tipos…»."));
+        protocolPickMultiKindsBtn_ = new QPushButton(QStringLiteral("Tipos…"));
+        protocolPickMultiKindsBtn_->setEnabled(false);
+        connect(protocolMultiKindFilterChk_, &QCheckBox::toggled, this, [this](bool on) {
+            if (protocolKindFilter_ != nullptr) {
+                protocolKindFilter_->setEnabled(!on);
+            }
+            if (protocolPickMultiKindsBtn_ != nullptr) {
+                protocolPickMultiKindsBtn_->setEnabled(on);
+            }
+            if (!on) {
+                protocolMultiKindPickSet_.clear();
+            }
+            applyProtocolLogFilters();
+        });
+        connect(protocolPickMultiKindsBtn_, &QPushButton::clicked, this, &MainWindow::openProtocolKindMultiFilterDialog);
+        fl2->addWidget(protocolPauseTableCaptureChk_);
+        fl2->addWidget(protocolMultiKindFilterChk_);
+        fl2->addWidget(protocolPickMultiKindsBtn_);
+        fl2->addStretch(1);
+        v->addLayout(fl2);
 
         idAliasRulesEdit_ = new QPlainTextEdit;
         idAliasRulesEdit_->setPlaceholderText(QStringLiteral(
@@ -583,6 +900,7 @@ MainWindow::MainWindow(QWidget* parent)
         protocolDetailText_ = new QTextBrowser;
         protocolDetailText_->setReadOnly(true);
         protocolDetailText_->setOpenExternalLinks(false);
+        protocolDetailText_->setOpenLinks(false);
         protocolDetailText_->setMinimumHeight(220);
         protocolDetailText_->setStyleSheet(
             QStringLiteral("QTextBrowser { background-color: #111827; color: #e5e7eb; }"));
@@ -591,7 +909,45 @@ MainWindow::MainWindow(QWidget* parent)
             df.setFamily(QStringLiteral("Segoe UI"));
             protocolDetailText_->setFont(df);
         }
+        connect(protocolDetailText_, &QTextBrowser::anchorClicked, this, [this](const QUrl& url) {
+            if (url.scheme() != QLatin1String("dofusid") || url.host() != QLatin1String("save")) {
+                return;
+            }
+            QString p = url.path();
+            if (p.startsWith(QLatin1Char('/'))) {
+                p = p.mid(1);
+            }
+            bool ok = false;
+            const quint64 id = p.toULongLong(&ok);
+            if (!ok || id == 0) {
+                return;
+            }
+            promptSaveIdFromPacketDetail(id);
+        });
         dv->addWidget(protocolDetailText_);
+
+        irxClassifyFrame_ = new QFrame;
+        irxClassifyFrame_->setVisible(false);
+        irxClassifyFrame_->setStyleSheet(QStringLiteral("QFrame { background:#0f172a; border:1px solid #334155;"
+                                                      "border-radius:6px; padding: 4px;}"));
+        auto* irLay = new QHBoxLayout(irxClassifyFrame_);
+        irLay->addWidget(new QLabel(QStringLiteral("<b>IRX</b>: ID rápido →")));
+        irxIdCombo_ = new QComboBox;
+        irxIdCombo_->setMinimumWidth(200);
+        irLay->addWidget(irxIdCombo_);
+        irxNameEdit_ = new QLineEdit;
+        irxNameEdit_->setPlaceholderText(QStringLiteral("Nombre visible (opcional)"));
+        irxNameEdit_->setMinimumWidth(180);
+        irLay->addWidget(irxNameEdit_);
+        irxMarkMonsterBtn_ = new QPushButton(QStringLiteral("Marcar como monstruo"));
+        irxMarkPersonajeBtn_ = new QPushButton(QStringLiteral("Marcar como personaje"));
+        irLay->addWidget(irxMarkMonsterBtn_);
+        irLay->addWidget(irxMarkPersonajeBtn_);
+        irLay->addStretch(1);
+        connect(irxMarkMonsterBtn_, &QPushButton::clicked, this, [this]() { persistSelectedIrxId(true); });
+        connect(irxMarkPersonajeBtn_, &QPushButton::clicked, this, [this]() { persistSelectedIrxId(false); });
+        dv->addWidget(irxClassifyFrame_);
+
         auto* tmplRow = new QHBoxLayout;
         saveTmplN_btn_ = new QPushButton(QStringLiteral("Plantilla ☆iri → Norte"));
         saveTmplS_btn_ = new QPushButton(QStringLiteral("Sur"));
@@ -1123,6 +1479,15 @@ MainWindow::MainWindow(QWidget* parent)
     iriTemplateCheckLbl_->setStyleSheet(QStringLiteral("color:#fcd34d;"));
     ml->addWidget(iriTemplateCheckLbl_);
 
+    movementSeqHintLbl_ = new QLabel(QStringLiteral(
+        "<span style=\"color:#bae6fd\">Cambiar de mapa</span>: al subir ves a veces un paquete C→S muy corto clasificado como "
+        "<code>ISP</code> con <code>type.ankama.com/jnr</code> y <code>type.ankama.com/isp</code> mezclados en el mismo payload — "
+        "sincronización. El movimiento con «clic mapa» reutiliza un IRI cliente→servidor "
+        "(<code>type.ankama.com/iri</code>); los botones N/S/E/O y las plantillas ☆iri son la forma fiable de replicarlo en esta app."));
+    movementSeqHintLbl_->setWordWrap(true);
+    movementSeqHintLbl_->setStyleSheet(QStringLiteral("color:#cbd5e1;"));
+    ml->addWidget(movementSeqHintLbl_);
+
     {
         auto* harvestBox = new QGroupBox(QStringLiteral("Recolectar · espera"));
         auto* hl = new QGridLayout(harvestBox);
@@ -1167,7 +1532,11 @@ MainWindow::MainWindow(QWidget* parent)
     statusBar()->addPermanentWidget(characterStatusBarLbl_);
 
     connect(proxy_, &TcpMitmProxy::logLine, this, &MainWindow::appendProxyLog);
-    connect(proxy_, &TcpMitmProxy::protocolPayloadCaptured, this, &MainWindow::onProtocolPayloadCaptured);
+    // Importante: mismo hilo GUI que el proxy. Antes estábamos con DirectConnection → el slot se ejecutaba
+    // antes de que TcpMitmProxy hiciera queueToClient_, retrasando S→C (p. ej. handoff CO→GA) hasta terminar el
+    // análisis (varints/buildRecord/UI). Encola para entregar octets primero y analizar después.
+    connect(proxy_, &TcpMitmProxy::protocolPayloadCaptured, this, &MainWindow::onProtocolPayloadCaptured,
+            Qt::QueuedConnection);
     connect(proxy_, &TcpMitmProxy::tunnelReadyChanged, this, &MainWindow::updateTunnelStatus);
 
     appendProxyLog(QStringLiteral(
@@ -1719,6 +2088,216 @@ QString MainWindow::movementInjectionPrecheck(const QByteArray& patched, const Q
     return {};
 }
 
+bool MainWindow::packetKindIsClientMapTransitMacro(PacketKind k) const
+{
+    switch (k) {
+    case PacketKind::ItrMapTransitClient:
+    case PacketKind::ItoMapTransitClient:
+    case PacketKind::MapHopJnrIspClient:
+        return true;
+    default:
+        return false;
+    }
+}
+
+QString MainWindow::defaultMapTransitMacroPath() const
+{
+    return QDir(QCoreApplication::applicationDirPath())
+        .absoluteFilePath(QStringLiteral("map_transition_macro.json"));
+}
+
+void MainWindow::saveMapTransitMacroFromSelection()
+{
+    if (protocolLogTree_ == nullptr) {
+        return;
+    }
+    const QList<QTreeWidgetItem*> sel = protocolLogTree_->selectedItems();
+    if (sel.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("Macro cambio de mapa"),
+                                 QStringLiteral("Selecciona uno o más paquetes en Logs (Ctrl+clic)."));
+        return;
+    }
+    QVector<int> vix;
+    vix.reserve(sel.size());
+    for (QTreeWidgetItem* it : sel) {
+        const int ix = it->data(0, kProtoVecRole).toInt();
+        if (ix >= 0 && ix < protocolRecords_.size()) {
+            vix.push_back(ix);
+        }
+    }
+    std::sort(vix.begin(), vix.end());
+
+    QJsonArray steps;
+    QStringList skipped;
+    for (int ix : vix) {
+        const ProtocolPacketRecord& r = protocolRecords_.at(ix);
+        if (!r.fromClient) {
+            skipped << QStringLiteral("#%1 (S→C omitido)").arg(r.index);
+            continue;
+        }
+        if (!packetKindIsClientMapTransitMacro(r.kind)) {
+            skipped << QStringLiteral("#%1 %2").arg(r.index).arg(r.kindLabel);
+            continue;
+        }
+        QJsonObject o;
+        o[QStringLiteral("packetIndex")] = r.index;
+        o[QStringLiteral("kind")] = packetKindDisplayString(r.kind);
+        o[QStringLiteral("payloadBase64")] = QLatin1String(r.rawPayload.toBase64());
+        steps.append(o);
+    }
+    if (steps.isEmpty()) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Macro cambio de mapa"),
+            QStringLiteral("No quedaron pasos válidos.\nSelecciona solo paquetes <b>cliente→servidor</b> clasificados "
+                           "como <b>ITR</b>, <b>ITO</b> o <b>PASO MAPA (JNR+ISP)</b>.\n\nOmitidos:\n• ")
+                + skipped.join(QStringLiteral("\n• ")));
+        return;
+    }
+    const QString defaultPath = defaultMapTransitMacroPath();
+    const QString path =
+        QFileDialog::getSaveFileName(this,
+                                     QStringLiteral("Guardar macro cambio de mapa"),
+                                     defaultPath,
+                                     QStringLiteral("JSON (*.json);;Todos (*.*)"));
+    if (path.isEmpty()) {
+        return;
+    }
+    const int delayMs = mapTransitMacroDelaySpin_ != nullptr ? mapTransitMacroDelaySpin_->value() : 250;
+    QJsonObject root;
+    root[QStringLiteral("version")] = 1;
+    root[QStringLiteral("savedAt")] = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+    root[QStringLiteral("delayMsBetweenSteps")] = delayMs;
+    root[QStringLiteral("steps")] = steps;
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        QMessageBox::warning(this, QStringLiteral("Macro cambio de mapa"),
+                             QStringLiteral("No se pudo escribir:\n%1").arg(path));
+        return;
+    }
+    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    f.close();
+
+    QString msg = QStringLiteral("Guardados %1 paso(s).").arg(steps.size());
+    if (!skipped.isEmpty()) {
+        msg += QStringLiteral("\n\nFilas omitidas:\n• ") + skipped.join(QStringLiteral("\n• "));
+    }
+    QMessageBox::information(this, QStringLiteral("Macro cambio de mapa"), msg);
+    appendProxyLog(QStringLiteral("[MAP-MACRO] Guardado JSON: %1 (%2 pasos).")
+                         .arg(QDir::toNativeSeparators(path))
+                         .arg(steps.size()));
+    statusBar()->showMessage(QStringLiteral("Macro mapa guardada: %1").arg(QDir::toNativeSeparators(path)), 5000);
+}
+
+void MainWindow::replayMapTransitMacroFromDialog()
+{
+    if (mapMacroReplayActive_) {
+        QMessageBox::information(this, QStringLiteral("Macro cambio de mapa"),
+                                 QStringLiteral("Ya hay una reproducción en curso."));
+        return;
+    }
+    if (transparentProxyChk_ != nullptr && transparentProxyChk_->isChecked()) {
+        QMessageBox::information(
+            this,
+            QStringLiteral("Modo transparente"),
+            QStringLiteral("Desactivá «Modo transparente» para inyectar la macro."));
+        return;
+    }
+    if (proxy_ == nullptr) {
+        return;
+    }
+
+    const QString path =
+        QFileDialog::getOpenFileName(this,
+                                     QStringLiteral("Reproducir macro cambio de mapa"),
+                                     defaultMapTransitMacroPath(),
+                                     QStringLiteral("JSON (*.json);;Todos (*.*)"));
+    if (path.isEmpty()) {
+        return;
+    }
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, QStringLiteral("Macro cambio de mapa"),
+                             QStringLiteral("No se pudo abrir:\n%1").arg(path));
+        return;
+    }
+    QJsonParseError jerr{};
+    const QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &jerr);
+    f.close();
+    if (!doc.isObject()) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Macro cambio de mapa"),
+            QStringLiteral("JSON inválido (%1 línea %2).").arg(jerr.errorString()).arg(jerr.offset));
+        return;
+    }
+    const QJsonObject root = doc.object();
+    int delayMs = mapTransitMacroDelaySpin_ != nullptr ? mapTransitMacroDelaySpin_->value() : 250;
+    if (root.contains(QStringLiteral("delayMsBetweenSteps"))) {
+        delayMs = root.value(QStringLiteral("delayMsBetweenSteps")).toInt(delayMs);
+    }
+    QVector<QByteArray> queue;
+    const QJsonArray arr = root.value(QStringLiteral("steps")).toArray();
+    for (const QJsonValue& v : arr) {
+        if (!v.isObject()) {
+            continue;
+        }
+        const QByteArray pl = QByteArray::fromBase64(v.toObject().value(QStringLiteral("payloadBase64")).toString().toLatin1());
+        if (!pl.isEmpty()) {
+            queue.push_back(pl);
+        }
+    }
+    if (queue.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Macro cambio de mapa"),
+                             QStringLiteral("El archivo no tiene «steps» con payloadBase64 válido."));
+        return;
+    }
+
+    mapMacroReplayQueue_ = std::move(queue);
+    mapMacroReplayNextIndex_ = 0;
+    mapMacroReplayDelayMs_ = qBound(0, delayMs, 60000);
+    mapMacroReplayActive_ = true;
+    refreshMovementButtonsEnabled();
+    appendProxyLog(QStringLiteral("[MAP-MACRO] Reproducir desde %1 — %2 pasos, pausa %3 ms.")
+                         .arg(QDir::toNativeSeparators(path))
+                         .arg(mapMacroReplayQueue_.size())
+                         .arg(mapMacroReplayDelayMs_));
+    continueMapMacroReplayChain();
+}
+
+void MainWindow::continueMapMacroReplayChain()
+{
+    if (!mapMacroReplayActive_) {
+        return;
+    }
+    if (mapMacroReplayNextIndex_ >= mapMacroReplayQueue_.size()) {
+        mapMacroReplayActive_ = false;
+        appendProxyLog(QStringLiteral("[MAP-MACRO] Fin (%1 pasos).").arg(mapMacroReplayQueue_.size()));
+        refreshMovementButtonsEnabled();
+        statusBar()->showMessage(QStringLiteral("Macro cambio de mapa: reproducción terminada."), 4000);
+        return;
+    }
+    const QByteArray pl = mapMacroReplayQueue_.at(mapMacroReplayNextIndex_);
+    const int stepNo = mapMacroReplayNextIndex_ + 1;
+    ++mapMacroReplayNextIndex_;
+    const QString err = proxy_->injectTowardServer(pl);
+    if (!err.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Macro cambio de mapa"),
+                             QStringLiteral("Paso %1/%2 — no se envió:\n\n%3")
+                                 .arg(stepNo)
+                                 .arg(mapMacroReplayQueue_.size())
+                                 .arg(err));
+        mapMacroReplayActive_ = false;
+        refreshMovementButtonsEnabled();
+        return;
+    }
+    appendProxyLog(QStringLiteral("[MAP-MACRO] Paso %1/%2 (%3 B)")
+                       .arg(stepNo)
+                       .arg(mapMacroReplayQueue_.size())
+                       .arg(pl.size()));
+    QTimer::singleShot(mapMacroReplayDelayMs_, this, &MainWindow::continueMapMacroReplayChain);
+}
+
 void MainWindow::refreshIriDiagnostics()
 {
     if (iriTokenStatusLbl_ == nullptr || iriTemplateCheckLbl_ == nullptr || proxy_ == nullptr) {
@@ -1957,6 +2536,9 @@ void MainWindow::refreshMovementButtonsEnabled()
     const bool harvestOk = proxyOk && !transparent;
     if (recolectHarvestBtn_ != nullptr) {
         recolectHarvestBtn_->setEnabled(harvestOk);
+    }
+    if (replayMapTransitMacroBtn_ != nullptr) {
+        replayMapTransitMacroBtn_->setEnabled(harvestOk && !mapMacroReplayActive_);
     }
 }
 
@@ -2535,6 +3117,10 @@ QColor MainWindow::protocolKindColor(PacketKind k) const
     case PacketKind::IeeHarvest:
         return QColor(34, 139, 34); // forest green
     case PacketKind::IsoResources:
+    case PacketKind::ItxMapHeavyServer:
+    case PacketKind::MapGatherIerSnapshotServer:
+    case PacketKind::MapGatherIevTapClient:
+    case PacketKind::MapGatherIeuBundleServer:
         return QColor(255, 200, 100);
     case PacketKind::IrxMonsters:
         return Qt::red;
@@ -2552,6 +3138,18 @@ QColor MainWindow::protocolKindColor(PacketKind k) const
     case PacketKind::IrkSyncResponse:
     case PacketKind::IspSync:
         return QColor(120, 180, 255);
+    case PacketKind::MapHopJnrIspClient:
+        return QColor(34, 211, 153);
+    case PacketKind::IsaPingClient:
+    case PacketKind::ItrMapTransitClient:
+    case PacketKind::ItoMapTransitClient:
+    case PacketKind::JsaPulseClient:
+        return QColor(125, 211, 252);
+    case PacketKind::IshMapTinyServer:
+    case PacketKind::MapHydrateTripleServer:
+    case PacketKind::KtaKeyedServer:
+    case PacketKind::JsbPulseServer:
+        return QColor(147, 197, 253);
     case PacketKind::ItvInteraction:
         return QColor(160, 230, 190);
     case PacketKind::KjCompression:
@@ -2577,6 +3175,10 @@ QString MainWindow::packetTypeEmoji(PacketKind k) const
     case PacketKind::IeeHarvest:
         return QStringLiteral("🌾");
     case PacketKind::IsoResources:
+    case PacketKind::ItxMapHeavyServer:
+    case PacketKind::MapGatherIerSnapshotServer:
+    case PacketKind::MapGatherIevTapClient:
+    case PacketKind::MapGatherIeuBundleServer:
         return QStringLiteral("📦");
     case PacketKind::IrxMonsters:
         return QStringLiteral("👾");
@@ -2594,6 +3196,18 @@ QString MainWindow::packetTypeEmoji(PacketKind k) const
     case PacketKind::IrkSyncResponse:
     case PacketKind::IspSync:
         return QStringLiteral("🔄");
+    case PacketKind::MapHopJnrIspClient:
+        return QStringLiteral("🗺");
+    case PacketKind::IsaPingClient:
+    case PacketKind::ItrMapTransitClient:
+    case PacketKind::ItoMapTransitClient:
+    case PacketKind::JsaPulseClient:
+        return QStringLiteral("➡");
+    case PacketKind::IshMapTinyServer:
+    case PacketKind::MapHydrateTripleServer:
+    case PacketKind::KtaKeyedServer:
+    case PacketKind::JsbPulseServer:
+        return QStringLiteral("📥");
     case PacketKind::ItvInteraction:
         return QStringLiteral("🖱");
     case PacketKind::KjCompression:
@@ -2631,6 +3245,12 @@ QString MainWindow::buildProtocolPacketDetailHtml(const ProtocolPacketRecord& re
                      tc.name(),
                      rec.kindLabel.toHtmlEscaped());
 
+    if (detailPanelHighlightsInteraction(rec)) {
+        html += QStringLiteral(
+            "<p style=\"color:#f472b6;margin:8px 0 4px;\">🎯 <b>Interacción / farmeo</b> — aquí suele estar el "
+            "ID del recurso que tocaste; usa «Guardar ID (clic)» antes del HEX.</p>");
+    }
+
     html += QStringLiteral("<p><b style=\"color:#fbbf24;\">Análisis</b><br>");
     switch (rec.kind) {
     case PacketKind::IriMovement:
@@ -2641,6 +3261,16 @@ QString MainWindow::buildProtocolPacketDetailHtml(const ProtocolPacketRecord& re
         break;
     case PacketKind::IsoResources:
         html += QStringLiteral("• Información de recursos en el mapa (ISO)<br>");
+        break;
+    case PacketKind::MapGatherIerSnapshotServer:
+        html += QStringLiteral("• Estado / snapshot servidor con <code>ier</code> típico al farmear "
+                             "(IDs de recurso en varints incluidos en el agregado de la tabla).<br>");
+        break;
+    case PacketKind::MapGatherIevTapClient:
+        html += QStringLiteral("• Toque cliente <code>iev</code> antes de la respuesta de mapa recurso.<br>");
+        break;
+    case PacketKind::MapGatherIeuBundleServer:
+        html += QStringLiteral("• Bundles <code>ieu</code>/<code>iet</code>/<code>ies</code> servidor con IDs de recurso.<br>");
         break;
     case PacketKind::IrxMonsters:
         html += QStringLiteral("• Lista / datos de monstruos en el mapa (IRX)<br>");
@@ -2667,10 +3297,43 @@ QString MainWindow::buildProtocolPacketDetailHtml(const ProtocolPacketRecord& re
         html += QStringLiteral("• Respuesta de sincronización (IRK)<br>");
         break;
     case PacketKind::IspSync:
-        html += QStringLiteral("• Sincronización / ISP<br>");
+        html += QStringLiteral("• Sincronización / ISP (sin par JNR en el mismo mensaje)<br>");
+        break;
+    case PacketKind::MapHopJnrIspClient:
+        html += QStringLiteral("• Paso entre mapas típico del cliente: mismo payload combina <code>jnr</code> e "
+                             "<code>isp</code> (~88 B). Suele ir detrás de la secuencia ITR/ISH/ITO + hidrato "
+                             "servidor.<br>");
+        break;
+    case PacketKind::IsaPingClient:
+        html += QStringLiteral("• ISA — arranque sesión / estado mapa (cliente).<br>");
+        break;
+    case PacketKind::ItrMapTransitClient:
+        html += QStringLiteral("• ITR — tramo cliente→servidor dentro de la transición entre mapas.<br>");
+        break;
+    case PacketKind::IshMapTinyServer:
+        html += QStringLiteral("• ISH — respuesta corta servidor en el tramo de mapa.<br>");
+        break;
+    case PacketKind::ItoMapTransitClient:
+        html += QStringLiteral("• ITO — tramo cliente tras ISH (compromiso / orientación).<br>");
+        break;
+    case PacketKind::MapHydrateTripleServer:
+        html += QStringLiteral("• Paquete servidor con <code>iue</code>, <code>iuc</code> y/o <code>knw</code> "
+                             "(contexto / coordenadas de mapa antes del paso JNR+ISP).<br>");
+        break;
+    case PacketKind::ItxMapHeavyServer:
+        html += QStringLiteral("• ITX — carga voluminosa de datos de mapa en el servidor.<br>");
+        break;
+    case PacketKind::KtaKeyedServer:
+        html += QStringLiteral("• KTA — clave / payload asociado al mapa en el servidor.<br>");
+        break;
+    case PacketKind::JsaPulseClient:
+        html += QStringLiteral("• JSA — pulso corto cliente antes de continuar el tramo.<br>");
+        break;
+    case PacketKind::JsbPulseServer:
+        html += QStringLiteral("• JSB — pulso corto servidor (respuesta al JSA).<br>");
         break;
     case PacketKind::ItvInteraction:
-        html += QStringLiteral("• Interacción / ITV<br>");
+        html += QStringLiteral("• ITV — transferencia de información (no es recolección; IEE = recolección)<br>");
         break;
     case PacketKind::KjCompression:
         html += QStringLiteral("• Posible compresión / KJ<br>");
@@ -2726,11 +3389,92 @@ QString MainWindow::buildProtocolPacketDetailHtml(const ProtocolPacketRecord& re
     html += QStringLiteral("</p>");
 
     if (rec.kind == PacketKind::IrxMonsters || rec.kind == PacketKind::IslEntities) {
+        const IrxVarintBuckets buck = classifyIrxStyleVarints(rec.numericIds);
+        auto listIds = [](const QList<quint64>& lst) {
+            QString s;
+            for (quint64 id : lst) {
+                s += QStringLiteral("&nbsp;• %1 (posible monstruo / criatura)<br>").arg(id);
+            }
+            return s;
+        };
+        auto listPlayers = [](const QList<quint64>& lst) {
+            QString s;
+            for (quint64 id : lst) {
+                s += QStringLiteral("&nbsp;• %1<br>").arg(id);
+            }
+            return s;
+        };
+        auto listStruct = [](const QList<quint64>& lst) {
+            QString s;
+            for (quint64 id : lst) {
+                s += QStringLiteral("%1, ").arg(id);
+            }
+            if (!s.isEmpty()) {
+                s.chop(2);
+            }
+            return s;
+        };
+        html += QStringLiteral("<p><b style=\"color:#fca5a5;\">👾 Monstruos típicos (IDs ≥ 1.000.000)</b></p>");
+        html += buck.monsters.isEmpty()
+                    ? QStringLiteral("<p style=\"color:#64748b;\">Sin IDs en ese rango.</p>")
+                    : (QStringLiteral("<p style=\"color:#fde68a;\">") + listIds(buck.monsters)
+                       + QStringLiteral("</p>"));
+        html += QStringLiteral(
+            "<p><b style=\"color:#93c5fd;\">👤 Personajes / jugadores (aprox. 1.000 – 9.999)</b></p>");
+        html += buck.players.isEmpty()
+                    ? QStringLiteral("<p style=\"color:#64748b;\">Sin IDs en ese rango.</p>")
+                    : QStringLiteral("<p style=\"color:#bfdbfe;\">")
+                          + listPlayers(buck.players)
+                          + QStringLiteral("</p>"
+                                           "<p style=\"color:#f87171;font-size:11px;\">⚠ No son automáticamente "
+                                           "«monstruos de mapa»; suelen referirse a jugadores u otras entidades.</p>");
+        html += QStringLiteral("<p><b style=\"color:#94a3b8;\">🔧 Estructura interna típica (IDs &lt; 1.000)</b></p>");
+        {
+            QString structLine = listStruct(buck.structure);
+            if (structLine.isEmpty()) {
+                structLine = QStringLiteral("—");
+            }
+            html += QStringLiteral("<p style=\"color:#cbd5e1;font-size:10pt;font-family:Consolas,monospace;\">")
+                + structLine.toHtmlEscaped()
+                + QStringLiteral("</p>"
+                             "<p style=\"color:#64748b;font-size:10px;\">Suelen ser campos de protocolo; "
+                             "ignóralos salvo investigación binaria.</p>");
+        }
+
         const QString irxBlock = analyzeIrxStyleVarintBuckets(rec.numericIds);
         if (!irxBlock.isEmpty()) {
-            html += QStringLiteral("<p><b style=\"color:#fca5a5;\">Heurística IRX / lista</b></p><pre style="
+            html += QStringLiteral("<p><b style=\"color:#fca5a5;\">Resumen texto legible</b></p><pre style="
                                    "white-space:pre-wrap;font-family:Consolas,monospace;font-size:10pt;color:#fdba74;\">%1</pre>")
                         .arg(irxBlock.toHtmlEscaped());
+        }
+    }
+
+    {
+        QSet<quint64> saveLinkIds;
+        for (quint64 id : rec.numericIds) {
+            if (isHeuristicResourceCandidateId(id)) {
+                saveLinkIds.insert(id);
+            }
+        }
+        for (quint64 id : filterResourceCandidateIds(rec.numericIds, parsedAndDatabaseRulesForResourceFilter())) {
+            saveLinkIds.insert(id);
+        }
+        if (!saveLinkIds.isEmpty()) {
+            QList<quint64> sorted = saveLinkIds.values();
+            std::sort(sorted.begin(), sorted.end());
+            QStringList anchors;
+            for (quint64 sid : sorted) {
+                anchors << QStringLiteral("<a href=\"dofusid://save/%1\" style=\"color:#7dd3fc;font-weight:bold;"
+                                          "text-decoration:underline;\">%1</a>")
+                             .arg(sid);
+            }
+            html +=
+                QStringLiteral("<p style=\"margin:14px 0 6px;\"><b style=\"color:#86efac;\">Guardar ID (clic)</b></p>"
+                               "<p style=\"margin:4px 0;line-height:1.7;font-size:12pt;font-family:Consolas,monospace;\">"
+                               "%1</p>"
+                               "<p style=\"color:#64748b;font-size:11px;margin:8px 0 2px;\">Cada número abre un menú: "
+                               "guardar como recurso o monstruo en <code>ids_database.json</code>.</p>")
+                    .arg(anchors.join(QStringLiteral(" · ")));
         }
     }
 
@@ -2787,6 +3531,8 @@ void MainWindow::reloadIdDatabaseFromDisk()
     if (!idDatabase_.loadFromFile(p, &err) && !err.isEmpty()) {
         appendProxyLog(QStringLiteral("[IDS] %1").arg(err));
     }
+    refreshSavedResMonUi();
+    refreshResourceCandidatesUi();
 }
 
 void MainWindow::reloadHarvestTemplateFromDisk()
@@ -2837,6 +3583,60 @@ void MainWindow::setupLibraryTab(QWidget* tab)
         libraryPreviewEdit_->setFont(fnt);
     }
     layout->addWidget(libraryPreviewEdit_);
+
+    layout->addWidget(new QLabel(QStringLiteral(
+        "<b>Búsqueda</b> en todos los archivos dentro de <code>exported_logs</code> (*.txt).")));
+    {
+        auto* h = new QHBoxLayout;
+        librarySearchEdit_ = new QLineEdit;
+        librarySearchEdit_->setPlaceholderText(QStringLiteral("texto (# paquete, HEX, substring URL…)"));
+        librarySearchBtn_ = new QPushButton(QStringLiteral("🔍 Buscar"));
+        librarySearchResults_ = new QListWidget;
+        librarySearchResults_->setMinimumHeight(100);
+        librarySearchResults_->setMaximumHeight(180);
+        h->addWidget(librarySearchEdit_, 1);
+        h->addWidget(librarySearchBtn_);
+        layout->addLayout(h);
+        layout->addWidget(librarySearchResults_);
+        libraryImportLogBtn_ = new QPushButton(QStringLiteral("📥 Importar log seleccionado (lista o resultado) "
+                                                              "→ pestaña Logs"));
+        libraryImportLogBtn_->setToolTip(QStringLiteral("Preferencia: entrada seleccionada en resultados "
+                                                         "de búsqueda; si no hay, el archivo destacado."));
+        layout->addWidget(libraryImportLogBtn_);
+        connect(librarySearchBtn_, &QPushButton::clicked, this, &MainWindow::librarySearchAcrossExportedLogs);
+        connect(librarySearchResults_, &QListWidget::itemDoubleClicked, this,
+                [this](QListWidgetItem* it) {
+                    if (it == nullptr) {
+                        return;
+                    }
+                    const QVariant v = it->data(Qt::UserRole + 101);
+                    if (v.canConvert<QString>() && QFile::exists(v.toString())) {
+                        importExportedLogFromPath(v.toString());
+                    }
+                });
+        connect(libraryImportLogBtn_, &QPushButton::clicked, this, [this]() {
+            QListWidgetItem* it = nullptr;
+            if (librarySearchResults_ != nullptr && librarySearchResults_->currentItem() != nullptr) {
+                it = librarySearchResults_->currentItem();
+            }
+            if (it != nullptr) {
+                const QVariant v = it->data(Qt::UserRole + 101);
+                if (v.canConvert<QString>() && QFile::exists(v.toString())) {
+                    importExportedLogFromPath(v.toString());
+                    return;
+                }
+            }
+            if (libraryLogList_ != nullptr && libraryLogList_->currentItem() != nullptr) {
+                const QString dirPath =
+                    QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("exported_logs"));
+                const QString path =
+                    QDir(dirPath).filePath(libraryLogList_->currentItem()->text());
+                if (QFile::exists(path)) {
+                    importExportedLogFromPath(path);
+                }
+            }
+        });
+    }
 
     auto* btnLayout = new QHBoxLayout;
     auto* openBtn = new QPushButton(QStringLiteral("📂 Abrir en editor externo"));
@@ -2930,19 +3730,21 @@ void MainWindow::refreshExportedLogsList()
 void MainWindow::openResourceEditor()
 {
     ResourceAliasEditor dlg(this);
-    dlg.loadFromMaps(idDatabase_.resourceOverrides(), idDatabase_.monsterNames(), idDatabase_.objectNames(),
-                     idDatabase_.customNotesById());
+    dlg.loadFromMaps(idDatabase_.resourceOverrides(), idDatabase_.monsterNames(), idDatabase_.playerNames(),
+                     idDatabase_.objectNames(), idDatabase_.customNotesById());
     if (dlg.exec() != QDialog::Accepted) {
         return;
     }
 
     QHash<quint64, QString> res;
     QHash<quint64, QString> mon;
+    QHash<quint64, QString> pl;
     QHash<quint64, QString> obj;
     QHash<quint64, QString> notes;
-    dlg.applyToMaps(&res, &mon, &obj, &notes);
+    dlg.applyToMaps(&res, &mon, &pl, &obj, &notes);
     idDatabase_.setResourceOverrides(res);
     idDatabase_.setMonsterNames(mon);
+    idDatabase_.setPlayerNames(pl);
     idDatabase_.setObjectNames(obj);
     idDatabase_.setCustomNotes(notes);
 
@@ -2953,7 +3755,7 @@ void MainWindow::openResourceEditor()
         return;
     }
     reloadIdDatabaseFromDisk();
-    rebuildResourcesTableFromRecords();
+    refreshResourceCandidatesUi();
     refreshProtocolDetailFromSelection();
     QMessageBox::information(this, QStringLiteral("Guardado"),
                              QStringLiteral("ids_database.json actualizado correctamente."));
@@ -2964,13 +3766,32 @@ void MainWindow::appendProtocolTreeItem(const ProtocolPacketRecord& r, int vecto
     if (protocolLogTree_ == nullptr) {
         return;
     }
+    QSet<int> selectedVec;
+    int currentVec = -1;
+    bool doAutoScrollTail = false;
+    {
+        for (QTreeWidgetItem* s : protocolLogTree_->selectedItems()) {
+            selectedVec.insert(s->data(0, kProtoVecRole).toInt());
+        }
+        if (QTreeWidgetItem* cur = protocolLogTree_->currentItem()) {
+            currentVec = cur->data(0, kProtoVecRole).toInt();
+        }
+        if (protocolLogAutoScrollChk_ != nullptr && protocolLogAutoScrollChk_->isChecked()) {
+            if (QScrollBar* sb = protocolLogTree_->verticalScrollBar()) {
+                doAutoScrollTail = sb->value() >= sb->maximum() - 3;
+            } else {
+                doAutoScrollTail = true;
+            }
+        }
+    }
+
     auto* it = new QTreeWidgetItem(protocolLogTree_);
     it->setData(0, Qt::UserRole, static_cast<int>(r.kind));
     it->setData(0, kProtoVecRole, vectorIndex);
     it->setText(0, QString::number(r.index));
     it->setText(1, r.received.toString(QStringLiteral("HH:mm:ss.zzz")));
     it->setText(2, r.fromClient ? QStringLiteral("→") : QStringLiteral("←"));
-    it->setText(3, r.kindLabel);
+    it->setText(3, protocolTreeKindColumnText(r));
     it->setText(4, QString::number(r.byteSize));
     it->setText(5, r.primaryUrl.isEmpty() ? QStringLiteral("—") : r.primaryUrl);
     {
@@ -3010,7 +3831,16 @@ void MainWindow::appendProtocolTreeItem(const ProtocolPacketRecord& r, int vecto
 
     protocolLogTree_->resizeColumnToContents(0);
     protocolLogTree_->resizeColumnToContents(4);
-    if (protocolLogAutoScrollChk_ != nullptr && protocolLogAutoScrollChk_->isChecked()) {
+
+    for (int i = 0; i < protocolLogTree_->topLevelItemCount(); ++i) {
+        QTreeWidgetItem* ti = protocolLogTree_->topLevelItem(i);
+        const int v = ti->data(0, kProtoVecRole).toInt();
+        ti->setSelected(selectedVec.contains(v));
+        if (v == currentVec) {
+            protocolLogTree_->setCurrentItem(ti);
+        }
+    }
+    if (doAutoScrollTail) {
         protocolLogTree_->scrollToItem(it, QAbstractItemView::PositionAtBottom);
         if (QScrollBar* sb = protocolLogTree_->verticalScrollBar()) {
             sb->setValue(sb->maximum());
@@ -3030,7 +3860,7 @@ void MainWindow::syncProtocolTreeItemFromRecord(int vecIndex)
             continue;
         }
         it->setData(0, Qt::UserRole, static_cast<int>(r.kind));
-        it->setText(3, r.kindLabel);
+        it->setText(3, protocolTreeKindColumnText(r));
         const QColor fgType = protocolKindColor(r.kind);
         const QColor dirFg = r.fromClient ? QColor(0x5e, 0xea, 0xd4) : QColor(0xfc, 0xa5, 0xa5);
         it->setForeground(0, QBrush(fgType));
@@ -3103,6 +3933,7 @@ void MainWindow::refreshProtocolDetailFromSelection()
     }
     const ProtocolPacketRecord& rec = protocolRecords_[vix];
     protocolDetailText_->setHtml(buildProtocolPacketDetailHtml(rec));
+    updateIrxQuickClassifyUi(vix);
 }
 
 void MainWindow::onProtocolLogCurrentItemChanged(QTreeWidgetItem* current, QTreeWidgetItem* /*previous*/)
@@ -3120,7 +3951,24 @@ void MainWindow::onProtocolLogContextMenu(const QPoint& pos)
     if (it == nullptr) {
         return;
     }
-    protocolLogTree_->setCurrentItem(it);
+
+    const QList<QTreeWidgetItem*> selBefore = protocolLogTree_->selectedItems();
+    const QSet<QTreeWidgetItem*> selSet(selBefore.begin(), selBefore.end());
+
+    if (selSet.isEmpty()) {
+        it->setSelected(true);
+        protocolLogTree_->setCurrentItem(it);
+    } else if (selSet.size() > 1 && selSet.contains(it)) {
+        if (auto* sm = protocolLogTree_->selectionModel(); sm != nullptr) {
+            sm->setCurrentIndex(protocolLogTree_->indexFromItem(it), QItemSelectionModel::Current);
+        }
+    } else if (!selSet.contains(it)) {
+        protocolLogTree_->clearSelection();
+        it->setSelected(true);
+        protocolLogTree_->setCurrentItem(it);
+    } else {
+        protocolLogTree_->setCurrentItem(it);
+    }
     refreshProtocolDetailFromSelection();
     bool okIdx = false;
     const int vix = it->data(0, kProtoVecRole).toInt(&okIdx);
@@ -3509,11 +4357,94 @@ void MainWindow::showImportLogPreviewDialog(const QString& path)
 
     onClearProtocolLogClicked();
     for (const auto& ch : chunks) {
-        onProtocolPayloadCaptured(ch.first, ch.second);
+        appendProtocolCaptureRecord(ch.first, ch.second);
     }
     appendProxyLog(QStringLiteral("[IMPORT] %1 trozos desde %2.")
                        .arg(chunks.size())
                        .arg(QDir::toNativeSeparators(path)));
+}
+
+bool MainWindow::protocolKindPassesVisibleFilters(PacketKind k, int comboIndex) const
+{
+    if (protocolMultiKindFilterChk_ != nullptr && protocolMultiKindFilterChk_->isChecked()) {
+        if (protocolMultiKindPickSet_.isEmpty()) {
+            return true;
+        }
+        return protocolMultiKindPickSet_.contains(k);
+    }
+    return packetKindMatchesFilterCombo(k, comboIndex);
+}
+
+void MainWindow::openProtocolKindMultiFilterDialog()
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Tipos de paquete visibles"));
+    dlg.resize(440, 480);
+    auto* lay = new QVBoxLayout(&dlg);
+    lay->addWidget(new QLabel(QStringLiteral(
+        "Marca los tipos que quieres ver. Todas las casillas marcadas o ninguna marcada = ver todos los tipos.")));
+
+    auto* scroll = new QScrollArea(&dlg);
+    scroll->setWidgetResizable(true);
+    auto* inner = new QWidget;
+    auto* vbox = new QVBoxLayout(inner);
+    const QStringList labels = standardPacketKindLabels();
+    QVector<QCheckBox*> cbs;
+    QVector<PacketKind> kinds;
+    cbs.reserve(labels.size());
+    kinds.reserve(labels.size());
+    const bool relaxed = protocolMultiKindPickSet_.isEmpty();
+    for (const QString& lab : labels) {
+        const PacketKind pk = packetKindFromDisplayLabel(lab);
+        auto* cb = new QCheckBox(lab);
+        cb->setChecked(relaxed || protocolMultiKindPickSet_.contains(pk));
+        cbs.push_back(cb);
+        kinds.push_back(pk);
+        vbox->addWidget(cb);
+    }
+    scroll->setWidget(inner);
+    lay->addWidget(scroll);
+
+    auto* presets = new QHBoxLayout;
+    auto* markAll = new QPushButton(QStringLiteral("Marcar todos"));
+    auto* markNone = new QPushButton(QStringLiteral("Desmarcar todos"));
+    presets->addWidget(markAll);
+    presets->addWidget(markNone);
+    presets->addStretch(1);
+    lay->addLayout(presets);
+
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    bb->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Aplicar"));
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    connect(markAll, &QPushButton::clicked, &dlg, [cbs]() {
+        for (QCheckBox* cb : cbs) {
+            cb->setChecked(true);
+        }
+    });
+    connect(markNone, &QPushButton::clicked, &dlg, [cbs]() {
+        for (QCheckBox* cb : cbs) {
+            cb->setChecked(false);
+        }
+    });
+    lay->addWidget(bb);
+
+    if (dlg.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    QSet<PacketKind> nu;
+    for (int i = 0; i < cbs.size(); ++i) {
+        if (cbs.at(i)->isChecked()) {
+            nu.insert(kinds.at(i));
+        }
+    }
+    if (nu.size() == cbs.size() || nu.isEmpty()) {
+        protocolMultiKindPickSet_.clear();
+    } else {
+        protocolMultiKindPickSet_ = std::move(nu);
+    }
+    applyProtocolLogFilters();
 }
 
 void MainWindow::applyProtocolLogFilters()
@@ -3528,48 +4459,7 @@ void MainWindow::applyProtocolLogFilters()
     for (int i = 0; i < protocolLogTree_->topLevelItemCount(); ++i) {
         QTreeWidgetItem* it = protocolLogTree_->topLevelItem(i);
         const auto k = static_cast<PacketKind>(it->data(0, Qt::UserRole).toInt());
-        bool okKind = false;
-        if (fil == 0) {
-            okKind = true;
-        } else if (fil == 1) {
-            okKind = (k == PacketKind::IriMovement);
-        } else if (fil == 2) {
-            okKind = (k == PacketKind::IrlList);
-        } else if (fil == 3) {
-            okKind = (k == PacketKind::IsoResources);
-        } else if (fil == 4) {
-            okKind = (k == PacketKind::IrxMonsters);
-        } else if (fil == 5) {
-            okKind = (k == PacketKind::IslEntities);
-        } else if (fil == 6) {
-            okKind = (k == PacketKind::CommandData);
-        } else if (fil == 7) {
-            okKind = (k == PacketKind::DataGeneric);
-        } else if (fil == 8) {
-            okKind = (k == PacketKind::Unknown);
-        } else if (fil == 9) {
-            okKind = (k == PacketKind::IeeHarvest);
-        } else if (fil == 10) {
-            okKind = (k == PacketKind::IdrItemReceived);
-        } else if (fil == 11) {
-            okKind = (k == PacketKind::IdyItemDisplayed);
-        } else if (fil == 12) {
-            okKind = (k == PacketKind::IdwItemVanished);
-        } else if (fil == 13) {
-            okKind = (k == PacketKind::IsuClientSync);
-        } else if (fil == 14) {
-            okKind = (k == PacketKind::IrkSyncResponse);
-        } else if (fil == 15) {
-            okKind = (k == PacketKind::IspSync);
-        } else if (fil == 16) {
-            okKind = (k == PacketKind::ItvInteraction);
-        } else if (fil == 17) {
-            okKind = (k == PacketKind::KjCompression);
-        } else if (fil == 18) {
-            okKind = (k == PacketKind::JmwMonsterCmd);
-        } else if (fil == 19) {
-            okKind = (k == PacketKind::JrrCommandResponse);
-        }
+        const bool okKind = protocolKindPassesVisibleFilters(k, fil);
         QString rowText;
         for (int c = 0; c < protocolLogTree_->columnCount(); ++c) {
             rowText += it->text(c);
@@ -3581,37 +4471,32 @@ void MainWindow::applyProtocolLogFilters()
 
 void MainWindow::rebuildResourcesTableFromRecords()
 {
-    if (resourcesTable_ == nullptr) {
-        return;
-    }
-    for (int i = 0; i < resourcesTable_->rowCount(); ++i) {
-        if (resourcesTable_->item(i, 1) != nullptr) {
-            resourcesTable_->item(i, 1)->setText(QStringLiteral("—"));
-        }
-    }
-    for (const ProtocolPacketRecord& r : protocolRecords_) {
-        if (r.kind != PacketKind::IsoResources) {
-            continue;
-        }
-        const QVector<IdRangeRule> merged = mergedAliasRulesForAnalysis();
-        for (quint64 id :
-             filterResourceCandidateIds(r.numericIds, parsedAndDatabaseRulesForResourceFilter())) {
-            const QString rn = resolveIdWithRules(id, merged, nullptr);
-            if (rn.isEmpty()) {
-                continue;
-            }
-            for (int row = 0; row < resourcesTable_->rowCount(); ++row) {
-                auto* nameCell = resourcesTable_->item(row, 0);
-                if (nameCell != nullptr && nameCell->text() == rn && resourcesTable_->item(row, 1) != nullptr) {
-                    resourcesTable_->item(row, 1)->setText(QString::number(id));
-                    break;
-                }
+    // NO reescaneamos paquetes para la tabla de candidatos: eso reinyectaba todo el histórico del log en el último
+    // mapa y anulaba la vista «solo sesión en vivo». Solo sincronizamos la etiqueta de mapa desde la cola del log.
+    quint64 runningMap = 0;
+    for (int i = 0; i < protocolRecords_.size(); ++i) {
+        const ProtocolPacketRecord& r = protocolRecords_.at(i);
+        if (packetKindUpdatesMapGuess(r.kind)) {
+            const quint64 m = guessMapIdHeuristic(r.rawPayload);
+            if (m != 0) {
+                runningMap = m;
             }
         }
     }
-    if (lastMapGuess_ != 0 && mapCurrentIdLbl_ != nullptr) {
-        mapCurrentIdLbl_->setText(QStringLiteral("Mapa actual: %1").arg(lastMapGuess_));
+    lastMapGuess_ = runningMap;
+    if (mapCurrentIdLbl_ != nullptr) {
+        mapCurrentIdLbl_->setText(runningMap != 0 ? QStringLiteral("Mapa actual: %1").arg(runningMap)
+                                                   : QStringLiteral("Mapa actual: —"));
     }
+    // Sin reescanear candidatos: vaciar para no mezclar sesión en vivo con el mapa inferido del log.
+    resourceCandidateHits_.clear();
+    resourceCandidateInteractedHits_.clear();
+    resourceCandidateSeenOnMap_.clear();
+    resourceCandidateSourceHex_.clear();
+    resourceCandidateLastInteractMs_.clear();
+    resourceCandidateIntroLogLabel_.clear();
+    resourceCandidateInteractLogLabel_.clear();
+    refreshResourceCandidatesUi();
 }
 
 void MainWindow::refreshCharacterLabels()
@@ -3633,34 +4518,993 @@ void MainWindow::refreshCharacterLabels()
                                                                                : characterSnap_.classLine));
 }
 
-void MainWindow::updateResourcesFromIsoPayload(const QByteArray& payload)
+bool MainWindow::packetKindFeedsResourceTotals(PacketKind k) const
+{
+    switch (k) {
+    case PacketKind::IsoResources:
+    case PacketKind::ItxMapHeavyServer:
+    case PacketKind::MapGatherIerSnapshotServer:
+    case PacketKind::MapGatherIevTapClient:
+    case PacketKind::MapGatherIeuBundleServer:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool MainWindow::packetKindIntroducesResourceCandidates(PacketKind k) const
+{
+    switch (k) {
+    case PacketKind::IsoResources:
+    case PacketKind::ItxMapHeavyServer:
+    case PacketKind::MapGatherIerSnapshotServer:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void MainWindow::updateGatherablesFromProtobufPayload(const QByteArray& payload, PacketKind sourceKind)
 {
     QList<quint64> vars;
     extractProtobufStyleVarints(payload, &vars);
     const QVector<IdRangeRule> merged = mergedAliasRulesForAnalysis();
-    for (quint64 id : filterResourceCandidateIds(vars, parsedAndDatabaseRulesForResourceFilter())) {
-        const QString rn = resolveIdWithRules(id, merged, nullptr);
-        if (rn.isEmpty() || resourcesTable_ == nullptr) {
-            continue;
+    // IMPORTANTE: algunos paquetes de recolección (RECO) contienen varints grandes (p. ej. 514168)
+    // que NO son ID de mapa. Si usamos la heurística de mapa aquí, se “resetea” la sesión y se
+    // borra la lista de candidatos al recolectar. Por eso, solo actualizamos el mapa cuando el
+    // paquete realmente sea de mapa (ISO/ITX/hidrato/paso mapa).
+    const bool allowMapHeuristic =
+        (sourceKind == PacketKind::IsoResources || sourceKind == PacketKind::ItxMapHeavyServer
+         || sourceKind == PacketKind::MapHydrateTripleServer || sourceKind == PacketKind::MapHopJnrIspClient);
+    if (allowMapHeuristic) {
+        const quint64 prevMap = lastMapGuess_;
+        const quint64 mid = guessMapIdHeuristic(payload);
+        if (mid != 0 && mid != prevMap) {
+            isoMapResourceTotals_.clear();
+            resourceCandidateHits_.clear();
+            resourceCandidateInteractedHits_.clear();
+            resourceCandidateSeenOnMap_.clear();
+            resourceCandidateSourceHex_.clear();
+            resourceCandidateLastInteractMs_.clear();
+            resourceCandidateIntroLogLabel_.clear();
+            resourceCandidateInteractLogLabel_.clear();
         }
-        for (int row = 0; row < resourcesTable_->rowCount(); ++row) {
-            auto* nameCell = resourcesTable_->item(row, 0);
-            if (nameCell != nullptr && nameCell->text() == rn && resourcesTable_->item(row, 1) != nullptr) {
-                resourcesTable_->item(row, 1)->setText(QString::number(id));
-                break;
+        if (mid != 0) {
+            lastMapGuess_ = mid;
+            if (mapCurrentIdLbl_ != nullptr) {
+                mapCurrentIdLbl_->setText(QStringLiteral("Mapa actual: %1").arg(mid));
             }
         }
     }
-    const quint64 mid = guessMapIdHeuristic(payload);
-    if (mid != 0) {
-        lastMapGuess_ = mid;
-        if (mapCurrentIdLbl_ != nullptr) {
-            mapCurrentIdLbl_->setText(QStringLiteral("Mapa actual: %1").arg(mid));
+
+    QSet<QString> touchedThisIsoDisplay;
+    for (quint64 id : vars) {
+        QString cat;
+        const QString rn = displayNameForGatherableResource(id);
+        if (rn.isEmpty()) {
+            if (packetKindIntroducesResourceCandidates(sourceKind)) {
+                considerResourceCandidateId(id, payload, sourceKind);
+            }
+            if (sourceKind == PacketKind::MapGatherIevTapClient
+                || sourceKind == PacketKind::MapGatherIeuBundleServer) {
+                markResourceCandidateInteracted(id, sourceKind);
+            }
+        }
+        if (!rn.isEmpty()) {
+            ++isoMapResourceTotals_[rn];
+            touchedThisIsoDisplay.insert(rn);
+        }
+
+        QString rowLabel = rn;
+        if (rowLabel.isEmpty()) {
+            QList<quint64> filt = filterResourceCandidateIds(QList<quint64>{id}, parsedAndDatabaseRulesForResourceFilter());
+            if (!filt.isEmpty()) {
+                rowLabel = resolveIdWithRules(id, merged, &cat);
+            }
+        }
+
+        if (rowLabel.isEmpty()) {
+            continue;
+        }
+    }
+
+    refreshIsoResourcesSummaryUi();
+    if (!touchedThisIsoDisplay.isEmpty()) {
+        QStringList summaryBits;
+        for (const QString& n : touchedThisIsoDisplay) {
+            summaryBits << QStringLiteral("%1: %2 u.")
+                             .arg(n)
+                             .arg(isoMapResourceTotals_.value(n));
+        }
+        appendResourceSessionSnapshot(summaryBits.join(QLatin1String(" · ")));
+    }
+    refreshResourceCandidatesUi();
+}
+
+void MainWindow::updateResourcesFromIsoPayload(const QByteArray& payload)
+{
+    updateGatherablesFromProtobufPayload(payload, PacketKind::IsoResources);
+}
+
+QString MainWindow::displayNameForGatherableResource(quint64 id) const
+{
+    QString cat;
+    const QString fromRules =
+        resolveIdWithRules(id, mergedAliasRulesForAnalysis(), &cat);
+    if (!fromRules.isEmpty()
+        && (cat.isEmpty() || cat == QStringLiteral("recurso"))) {
+        return fromRules;
+    }
+    if (!fromRules.isEmpty()) {
+        return {};
+    }
+    return ResourcePredictor::predict(id);
+}
+
+void MainWindow::refreshIsoResourcesSummaryUi()
+{
+    // Sección ISO agregada desactivada en UI; sigue procesándose estado internamente por si la reactivamos.
+    if (resourcesMapSummary_ == nullptr || !resourcesMapSummary_->isVisible()) {
+        return;
+    }
+    if (isoMapResourceTotals_.isEmpty()) {
+        resourcesMapSummary_->setHtml(QStringLiteral("<p style=\"margin:8px;color:#94a3b8;\">"
+                                                     "Aún sin varints clasificados como recurso de mapa en "
+                                                     "esta sesión (esperando ISO, ITX o paquetes RECO · IEU/IEV/IER).</p>"));
+    } else {
+        int mx = 1;
+        for (int tot : isoMapResourceTotals_) {
+            mx = qMax(mx, tot);
+        }
+        QString tbl = QStringLiteral("<table style=\"margin:8px;color:#f8fafc;border-collapse:collapse;\">");
+        for (auto it = isoMapResourceTotals_.constBegin(); it != isoMapResourceTotals_.constEnd(); ++it) {
+            int ticks = 1;
+            if (mx > 0) {
+                ticks = qBound(1, (10 * it.value() + mx - 1) / mx, 10);
+            }
+            QString bar;
+            for (int i = 0; i < ticks; ++i) {
+                bar.append(QChar(0x2588));
+            }
+            for (int i = ticks; i < 10; ++i) {
+                bar.append(QChar(0x2591));
+            }
+            tbl += QStringLiteral("<tr>"
+                                  "<td style=\"padding:4px 10px;color:#fcd34d;white-space:nowrap;\"><b>%1</b>"
+                                  "</td>"
+                                  "<td style=\"padding:4px;font-family:Consolas;font-size:12px;\">%2</td>"
+                                  "<td style=\"padding:4px;color:#bbf7d0;text-align:right;\">%3 u.</td>"
+                                  "</tr>")
+                       .arg(it.key().toHtmlEscaped(),
+                            bar,
+                            QString::number(it.value()));
+        }
+        tbl += QStringLiteral("</table>");
+        resourcesMapSummary_->setHtml(tbl);
+    }
+    if (resourcesMapUpdatedLbl_ != nullptr && resourcesMapUpdatedLbl_->isVisible()) {
+        resourcesMapUpdatedLbl_->setText(
+            QStringLiteral("Última actualización desde ISO: %1 · Mapa esperado en UI: %2")
+                .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz")),
+                     lastMapGuess_ != 0 ? QString::number(lastMapGuess_) : QStringLiteral("—")));
+    }
+}
+
+void MainWindow::appendResourceSessionSnapshot(const QString& summaryLine)
+{
+    if (resourceSessionHistory_ == nullptr || !resourceSessionHistory_->isVisible()) {
+        return;
+    }
+    QString line = QStringLiteral("[%1 · map %2] %3")
+                       .arg(QTime::currentTime().toString(QStringLiteral("HH:mm:ss")),
+                            lastMapGuess_ != 0 ? QString::number(lastMapGuess_) : QStringLiteral("—"),
+                            summaryLine);
+    resourceSessionSnapshots_.prepend(line);
+    const int limit = 64;
+    while (resourceSessionSnapshots_.size() > limit) {
+        resourceSessionSnapshots_.removeLast();
+    }
+    if (resourceSessionHistory_ != nullptr) {
+        resourceSessionHistory_->setPlainText(resourceSessionSnapshots_.join(QLatin1Char('\n')));
+    }
+}
+
+bool MainWindow::isHeuristicResourceCandidateId(quint64 id) const
+{
+    // Heurística simple: IDs de recursos (en nuestros dumps) viven cerca de 513xxx–514xxx.
+    // Esto captura casos como 514168 (ortiga_pregunta) aunque no exista alias/rango aún.
+    if (id < 513000 || id > 515000) {
+        return false;
+    }
+    // Si ya está en la base o en reglas de recurso, no es candidato.
+    if (displayNameForGatherableResource(id).isEmpty() == false) {
+        return false;
+    }
+    return true;
+}
+
+void MainWindow::considerResourceCandidateId(quint64 id, const QByteArray& payload, PacketKind sourceKind)
+{
+    if (!isHeuristicResourceCandidateId(id)) {
+        return;
+    }
+    // Mapa del propio paquete (IER/ISO/ITX pueden ir desfasados respecto a lastMapGuess_ si no pasó hidrato).
+    const quint64 midPacket = guessMapIdHeuristic(payload);
+    quint64 mapKey = midPacket != 0 ? midPacket : lastMapGuess_;
+    if (mapKey == 0) {
+        return;
+    }
+    if (lastMapGuess_ != 0 && mapKey != lastMapGuess_) {
+        return;
+    }
+    const quint64 prevSeen = resourceCandidateSeenOnMap_.value(id, 0);
+    if (prevSeen != mapKey) {
+        resourceCandidateSeenOnMap_[id] = mapKey;
+        resourceCandidateHits_[id] = 1;
+        resourceCandidateInteractedHits_.remove(id);
+        resourceCandidateLastInteractMs_.remove(id);
+        resourceCandidateIntroLogLabel_[id] = packetKindDisplayString(sourceKind);
+        resourceCandidateInteractLogLabel_.remove(id);
+        resourceCandidateSourceHex_[id] = QString::fromLatin1(payload.toHex());
+    }
+}
+
+void MainWindow::markResourceCandidateInteracted(quint64 id, PacketKind sourceKind)
+{
+    if (!isHeuristicResourceCandidateId(id)) {
+        return;
+    }
+    if (lastMapGuess_ == 0) {
+        return;
+    }
+    if (resourceCandidateSeenOnMap_.value(id, 0) != lastMapGuess_) {
+        return;
+    }
+    resourceCandidateInteractedHits_[id] = 1;
+    resourceCandidateLastInteractMs_[id] = QDateTime::currentMSecsSinceEpoch();
+    resourceCandidateInteractLogLabel_[id] = packetKindDisplayString(sourceKind);
+}
+
+void MainWindow::refreshResourceCandidatesUi()
+{
+    if (resourceCandidatesTable_ == nullptr || resourceCandidatesHintLbl_ == nullptr) {
+        return;
+    }
+
+    // Compactar: quitar IDs contados en otro mapa (por si no hubo evento de cambio explícito).
+    if (lastMapGuess_ != 0) {
+        QList<quint64> drop;
+        for (auto it = resourceCandidateHits_.constBegin(); it != resourceCandidateHits_.constEnd(); ++it) {
+            const quint64 id = it.key();
+            if (resourceCandidateSeenOnMap_.value(id, 0) != lastMapGuess_) {
+                drop.push_back(id);
+            }
+        }
+        for (quint64 id : drop) {
+            resourceCandidateHits_.remove(id);
+            resourceCandidateSeenOnMap_.remove(id);
+            resourceCandidateInteractedHits_.remove(id);
+            resourceCandidateSourceHex_.remove(id);
+            resourceCandidateLastInteractMs_.remove(id);
+            resourceCandidateIntroLogLabel_.remove(id);
+            resourceCandidateInteractLogLabel_.remove(id);
+        }
+    }
+
+    // IDs que ya tienen nombre en BD ya no son candidatos heurísticos (p. ej. tras guardar).
+    {
+        QList<quint64> dropNamed;
+        for (auto it = resourceCandidateHits_.constBegin(); it != resourceCandidateHits_.constEnd(); ++it) {
+            if (!isHeuristicResourceCandidateId(it.key())) {
+                dropNamed.push_back(it.key());
+            }
+        }
+        for (quint64 id : dropNamed) {
+            resourceCandidateHits_.remove(id);
+            resourceCandidateSeenOnMap_.remove(id);
+            resourceCandidateInteractedHits_.remove(id);
+            resourceCandidateSourceHex_.remove(id);
+            resourceCandidateLastInteractMs_.remove(id);
+            resourceCandidateIntroLogLabel_.remove(id);
+            resourceCandidateInteractLogLabel_.remove(id);
+        }
+    }
+
+    QVector<quint64> candIds;
+    candIds.reserve(resourceCandidateHits_.size());
+    for (auto it = resourceCandidateHits_.constBegin(); it != resourceCandidateHits_.constEnd(); ++it) {
+        const quint64 id = it.key();
+        if (lastMapGuess_ == 0) {
+            continue;
+        }
+        if (resourceCandidateSeenOnMap_.value(id, 0) != lastMapGuess_) {
+            continue;
+        }
+        candIds.push_back(id);
+    }
+    std::sort(candIds.begin(), candIds.end(), [this](quint64 a, quint64 b) {
+        const bool ia = resourceCandidateInteractedHits_.value(a, 0) > 0;
+        const bool ib = resourceCandidateInteractedHits_.value(b, 0) > 0;
+        if (ia != ib) {
+            return ia > ib;
+        }
+        if (ia) {
+            const qint64 ta = resourceCandidateLastInteractMs_.value(a, 0);
+            const qint64 tb = resourceCandidateLastInteractMs_.value(b, 0);
+            if (ta != tb) {
+                return ta > tb;
+            }
+        }
+        return a < b;
+    });
+
+    resourceCandidatesTable_->setRowCount(candIds.size());
+    for (int row = 0; row < candIds.size(); ++row) {
+        const quint64 id = candIds.at(row);
+        auto* idCell = new QTableWidgetItem(QString::number(id));
+        idCell->setData(kCandTableRowKindRole, kRowKindCandidate);
+        idCell->setData(Qt::UserRole, QVariant::fromValue<qulonglong>(static_cast<qulonglong>(id)));
+        const QString hinted = displayNameForGatherableResource(id);
+        auto* nameCell = new QTableWidgetItem(hinted.isEmpty() ? QStringLiteral("—") : hinted);
+        const QString rawIntro = resourceCandidateIntroLogLabel_.value(id);
+        const QString rawTouch = resourceCandidateInteractLogLabel_.value(id);
+        QString logCellText = QStringLiteral("—");
+        QString logTip;
+        const bool hasInteracted = resourceCandidateInteractedHits_.value(id, 0) > 0;
+        if (hasInteracted) {
+            const QString touchLbl =
+                rawTouch.isEmpty() ? QStringLiteral("RECO · toque") : rawTouch;
+            logCellText = QStringLiteral("(%1)").arg(touchLbl);
+            logTip =
+                rawIntro.isEmpty()
+                    ? QStringLiteral("Toque RECO — en el árbol de logs coincide con tipo «%1» (filtro RECO · IEV toque).")
+                          .arg(touchLbl)
+                    : QStringLiteral("%1 · detectado antes en snapshot: (%2)")
+                          .arg(touchLbl, rawIntro);
+        } else if (!rawIntro.isEmpty()) {
+            logCellText = QStringLiteral("(%1)").arg(rawIntro);
+            logTip =
+                QStringLiteral("Misma etiqueta que la columna «tipo» del log al capturar este snapshot.");
+        }
+        auto* logKindCell = new QTableWidgetItem(logCellText);
+        if (!logTip.isEmpty()) {
+            logKindCell->setToolTip(logTip);
+        }
+        const QString fullHex = resourceCandidateSourceHex_.value(id);
+        QString hexDisp =
+            fullHex.isEmpty() ? QStringLiteral("—")
+                              : (fullHex.size() > 36 ? fullHex.left(36).append(QStringLiteral("…")) : fullHex);
+        auto* hexCell = new QTableWidgetItem(hexDisp);
+        hexCell->setToolTip(fullHex.isEmpty()
+                                ? QStringLiteral("Sin hex de snapshot (solo se guarda desde ISO / ITX / IER snapshot).")
+                                : QStringLiteral("Hex completo (primer paquete de mapa):\n%1").arg(fullHex));
+        const int interacted = resourceCandidateInteractedHits_.value(id, 0);
+        auto* interCell = new QTableWidgetItem(interacted > 0 ? QStringLiteral("✅") : QStringLiteral("—"));
+        if (interacted > 0) {
+            interCell->setToolTip(QStringLiteral("Interactuado en este mapa (paquetes RECO IEV o IEU)."));
+        }
+        resourceCandidatesTable_->setItem(row, 0, idCell);
+        resourceCandidatesTable_->setItem(row, 1, nameCell);
+        resourceCandidatesTable_->setItem(row, 2, logKindCell);
+        resourceCandidatesTable_->setItem(row, 3, hexCell);
+        resourceCandidatesTable_->setItem(row, 4, interCell);
+    }
+
+    resourceCandidatesHintLbl_->setText(
+        QStringLiteral(
+            "Mapa UI %2 · %1 candidatos: solo IDs cuyo paquete ISO/ITX/IER infiere el mismo mapa que la UI (descarta IER desfasados). "
+            "Orden: interactuados más recientes primero.")
+            .arg(candIds.size())
+            .arg(lastMapGuess_ != 0 ? QString::number(lastMapGuess_) : QStringLiteral("—")));
+}
+
+void MainWindow::addSelectedResourceCandidateAsOverride()
+{
+    if (resourceCandidatesTable_ == nullptr) {
+        return;
+    }
+    const int row = resourceCandidatesTable_->currentRow();
+    if (row < 0) {
+        QMessageBox::information(this, QStringLiteral("Candidatos"), QStringLiteral("Selecciona un candidato primero."));
+        return;
+    }
+    auto* idCell = resourceCandidatesTable_->item(row, 0);
+    if (idCell == nullptr) {
+        return;
+    }
+    bool ok = false;
+    const quint64 id = idCell->text().toULongLong(&ok);
+    if (!ok || id == 0) {
+        return;
+    }
+
+    const QString name = promptPickResourceDisplayName(id);
+    if (name.trimmed().isEmpty()) {
+        return;
+    }
+
+    const QString srcHex = resourceCandidateSourceHex_.value(id);
+    if (!srcHex.isEmpty()) {
+        auto cap = idDatabase_.resourceCaptureHex();
+        cap[id] = srcHex;
+        idDatabase_.setResourceCaptureHex(cap);
+    }
+
+    auto res = idDatabase_.resourceOverrides();
+    res[id] = name.trimmed();
+    idDatabase_.setResourceOverrides(res);
+    QString err;
+    if (!idDatabase_.saveToFile(IdDatabase::defaultStoragePath(), &err)) {
+        QMessageBox::warning(this, QStringLiteral("Guardar"), err);
+        return;
+    }
+    resourceCandidateHits_.remove(id);
+    resourceCandidateSeenOnMap_.remove(id);
+    resourceCandidateInteractedHits_.remove(id);
+    resourceCandidateSourceHex_.remove(id);
+    resourceCandidateLastInteractMs_.remove(id);
+    resourceCandidateIntroLogLabel_.remove(id);
+    resourceCandidateInteractLogLabel_.remove(id);
+    reloadIdDatabaseFromDisk();
+    refreshProtocolDetailFromSelection();
+    refreshSavedResMonUi();
+    statusBar()->showMessage(QStringLiteral("Recurso guardado: %1 → %2").arg(id).arg(name.trimmed()), 4500);
+}
+
+void MainWindow::addSelectedResourceCandidateAsMonster()
+{
+    if (resourceCandidatesTable_ == nullptr) {
+        return;
+    }
+    const int row = resourceCandidatesTable_->currentRow();
+    if (row < 0) {
+        QMessageBox::information(this, QStringLiteral("Candidatos"), QStringLiteral("Selecciona un candidato primero."));
+        return;
+    }
+    auto* idCell = resourceCandidatesTable_->item(row, 0);
+    if (idCell == nullptr) {
+        return;
+    }
+    bool ok = false;
+    const quint64 id = idCell->text().toULongLong(&ok);
+    if (!ok || id == 0) {
+        return;
+    }
+
+    const QString name = promptPickMonsterDisplayName(id);
+    if (name.trimmed().isEmpty()) {
+        return;
+    }
+
+    const QString srcHex = resourceCandidateSourceHex_.value(id);
+    if (!srcHex.isEmpty()) {
+        auto cap = idDatabase_.monsterCaptureHex();
+        cap[id] = srcHex;
+        idDatabase_.setMonsterCaptureHex(cap);
+    }
+
+    auto mon = idDatabase_.monsterNames();
+    mon[id] = name.trimmed();
+    idDatabase_.setMonsterNames(mon);
+    QString err;
+    if (!idDatabase_.saveToFile(IdDatabase::defaultStoragePath(), &err)) {
+        QMessageBox::warning(this, QStringLiteral("Guardar"), err);
+        return;
+    }
+    resourceCandidateHits_.remove(id);
+    resourceCandidateSeenOnMap_.remove(id);
+    resourceCandidateInteractedHits_.remove(id);
+    resourceCandidateSourceHex_.remove(id);
+    resourceCandidateLastInteractMs_.remove(id);
+    resourceCandidateIntroLogLabel_.remove(id);
+    resourceCandidateInteractLogLabel_.remove(id);
+    reloadIdDatabaseFromDisk();
+    refreshProtocolDetailFromSelection();
+    refreshSavedResMonUi();
+    statusBar()->showMessage(QStringLiteral("Monstruo guardado: %1 → %2").arg(id).arg(name.trimmed()), 4500);
+}
+
+void MainWindow::hideSelectedResourceCandidate()
+{
+    if (resourceCandidatesTable_ == nullptr) {
+        return;
+    }
+    const int row = resourceCandidatesTable_->currentRow();
+    if (row < 0) {
+        return;
+    }
+    auto* idCell = resourceCandidatesTable_->item(row, 0);
+    if (idCell == nullptr) {
+        return;
+    }
+    bool ok = false;
+    const quint64 id = idCell->text().toULongLong(&ok);
+    if (!ok || id == 0) {
+        return;
+    }
+    resourceCandidateHits_.remove(id);
+    resourceCandidateSeenOnMap_.remove(id);
+    resourceCandidateInteractedHits_.remove(id);
+    resourceCandidateSourceHex_.remove(id);
+    resourceCandidateLastInteractMs_.remove(id);
+    resourceCandidateIntroLogLabel_.remove(id);
+    resourceCandidateInteractLogLabel_.remove(id);
+    refreshResourceCandidatesUi();
+}
+
+void MainWindow::removeInteractedResourceCandidates()
+{
+    QList<quint64> drop;
+    for (auto it = resourceCandidateInteractedHits_.constBegin(); it != resourceCandidateInteractedHits_.constEnd();
+         ++it) {
+        if (it.value() > 0) {
+            drop.push_back(it.key());
+        }
+    }
+    for (quint64 id : drop) {
+        resourceCandidateHits_.remove(id);
+        resourceCandidateSeenOnMap_.remove(id);
+        resourceCandidateInteractedHits_.remove(id);
+        resourceCandidateSourceHex_.remove(id);
+        resourceCandidateLastInteractMs_.remove(id);
+        resourceCandidateIntroLogLabel_.remove(id);
+        resourceCandidateInteractLogLabel_.remove(id);
+    }
+    refreshResourceCandidatesUi();
+    statusBar()->showMessage(
+        QStringLiteral("Quitados %1 candidatos interactuados.").arg(drop.size()), 3500);
+}
+
+QString MainWindow::promptPickResourceDisplayName(quint64 id)
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Guardar recurso"));
+    dlg.setMinimumWidth(420);
+    auto* lay = new QVBoxLayout(&dlg);
+    lay->addWidget(new QLabel(QStringLiteral(
+        "ID %1 — elegí un nombre ya guardado en «recursos» para reutilizar la etiqueta en otro ID, "
+        "o escribí uno nuevo en el campo editable.")
+                                    .arg(QString::number(id))));
+    auto* combo = new QComboBox;
+    combo->setEditable(true);
+    combo->setMinimumWidth(400);
+    QSet<QString> uniq;
+    for (auto it = idDatabase_.resourceOverrides().constBegin(); it != idDatabase_.resourceOverrides().constEnd();
+         ++it) {
+        const QString s = it.value().trimmed();
+        if (!s.isEmpty()) {
+            uniq.insert(s);
+        }
+    }
+    QStringList items = uniq.values();
+    items.sort(Qt::CaseInsensitive);
+    combo->addItems(items);
+    combo->setCurrentText(QStringLiteral("Recurso %1").arg(id));
+    lay->addWidget(combo);
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    lay->addWidget(bb);
+    if (dlg.exec() != QDialog::Accepted) {
+        return {};
+    }
+    return combo->currentText().trimmed();
+}
+
+QString MainWindow::promptPickMonsterDisplayName(quint64 id)
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Guardar monstruo"));
+    dlg.setMinimumWidth(420);
+    auto* lay = new QVBoxLayout(&dlg);
+    lay->addWidget(new QLabel(QStringLiteral(
+        "ID %1 — elegí un nombre ya guardado en «monstruos» o escribí uno nuevo.")
+                                    .arg(QString::number(id))));
+    auto* combo = new QComboBox;
+    combo->setEditable(true);
+    combo->setMinimumWidth(400);
+    QSet<QString> uniq;
+    for (auto it = idDatabase_.monsterNames().constBegin(); it != idDatabase_.monsterNames().constEnd(); ++it) {
+        const QString s = it.value().trimmed();
+        if (!s.isEmpty()) {
+            uniq.insert(s);
+        }
+    }
+    QStringList items = uniq.values();
+    items.sort(Qt::CaseInsensitive);
+    combo->addItems(items);
+    combo->setCurrentText(QStringLiteral("Monstruo %1").arg(id));
+    lay->addWidget(combo);
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    lay->addWidget(bb);
+    if (dlg.exec() != QDialog::Accepted) {
+        return {};
+    }
+    return combo->currentText().trimmed();
+}
+
+void MainWindow::promptSaveIdFromPacketDetail(quint64 id)
+{
+    if (id == 0) {
+        return;
+    }
+    QMenu menu(this);
+    QAction* actRes =
+        menu.addAction(QStringLiteral("💾 Guardar como recurso…"));
+    QAction* actMon =
+        menu.addAction(QStringLiteral("👾 Guardar como monstruo…"));
+    QAction* chosen = menu.exec(QCursor::pos());
+    if (chosen == nullptr) {
+        return;
+    }
+    auto saveName = [this, id](bool asMonster) -> bool {
+        const QString name =
+            asMonster ? promptPickMonsterDisplayName(id) : promptPickResourceDisplayName(id);
+        if (name.trimmed().isEmpty()) {
+            return false;
+        }
+        QString err;
+        if (asMonster) {
+            auto mon = idDatabase_.monsterNames();
+            mon[id] = name.trimmed();
+            idDatabase_.setMonsterNames(mon);
+        } else {
+            auto res = idDatabase_.resourceOverrides();
+            res[id] = name.trimmed();
+            idDatabase_.setResourceOverrides(res);
+        }
+        if (!idDatabase_.saveToFile(IdDatabase::defaultStoragePath(), &err)) {
+            QMessageBox::warning(this, QStringLiteral("Guardar"), err);
+            return false;
+        }
+        statusBar()->showMessage(QStringLiteral("Guardado ID %1 · %2").arg(id).arg(name.trimmed()), 4500);
+        return true;
+    };
+    if (chosen == actRes) {
+        if (!saveName(false)) {
+            return;
+        }
+    } else if (chosen == actMon) {
+        if (!saveName(true)) {
+            return;
+        }
+    } else {
+        return;
+    }
+    resourceCandidateHits_.remove(id);
+    resourceCandidateSeenOnMap_.remove(id);
+    resourceCandidateInteractedHits_.remove(id);
+    resourceCandidateSourceHex_.remove(id);
+    resourceCandidateLastInteractMs_.remove(id);
+    resourceCandidateIntroLogLabel_.remove(id);
+    resourceCandidateInteractLogLabel_.remove(id);
+    reloadIdDatabaseFromDisk();
+    refreshProtocolDetailFromSelection();
+}
+
+void MainWindow::refreshSavedResMonUi()
+{
+    if (savedResMonTable_ == nullptr) {
+        return;
+    }
+    struct Row {
+        QString kind;
+        quint64 id = 0;
+        QString name;
+    };
+    QVector<Row> rows;
+    rows.reserve(idDatabase_.resourceOverrides().size() + idDatabase_.monsterNames().size());
+    for (auto it = idDatabase_.resourceOverrides().constBegin(); it != idDatabase_.resourceOverrides().constEnd(); ++it) {
+        rows.push_back(Row{QStringLiteral("recurso"), it.key(), it.value()});
+    }
+    for (auto it = idDatabase_.monsterNames().constBegin(); it != idDatabase_.monsterNames().constEnd(); ++it) {
+        rows.push_back(Row{QStringLiteral("monstruo"), it.key(), it.value()});
+    }
+    std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
+        if (a.kind != b.kind) return a.kind < b.kind;
+        if (a.name != b.name) return a.name < b.name;
+        return a.id < b.id;
+    });
+
+    savedResMonTable_->setRowCount(rows.size());
+    for (int i = 0; i < rows.size(); ++i) {
+        savedResMonTable_->setItem(i, 0, new QTableWidgetItem(rows.at(i).kind));
+        savedResMonTable_->setItem(i, 1, new QTableWidgetItem(QString::number(rows.at(i).id)));
+        auto* nameIt = new QTableWidgetItem(rows.at(i).name);
+        const quint64 rid = rows.at(i).id;
+        QString tip;
+        if (rows.at(i).kind == QStringLiteral("recurso")) {
+            const QString hx = idDatabase_.resourceCaptureHex().value(rid);
+            if (!hx.isEmpty()) {
+                tip = QStringLiteral("Hex de captura (recurso):\n%1")
+                          .arg(hx.size() > 900 ? hx.left(900).append(QStringLiteral("…")) : hx);
+            }
+        } else if (rows.at(i).kind == QStringLiteral("monstruo")) {
+            const QString hx = idDatabase_.monsterCaptureHex().value(rid);
+            if (!hx.isEmpty()) {
+                tip = QStringLiteral("Hex de captura (monstruo):\n%1")
+                          .arg(hx.size() > 900 ? hx.left(900).append(QStringLiteral("…")) : hx);
+            }
+        }
+        if (!tip.isEmpty()) {
+            nameIt->setToolTip(tip);
+        }
+        savedResMonTable_->setItem(i, 2, nameIt);
+    }
+}
+
+void MainWindow::addSavedResourceDialog()
+{
+    bool ok = false;
+    const quint64 id = QInputDialog::getInt(this, QStringLiteral("Agregar recurso"), QStringLiteral("ID:"), 0, 0, INT_MAX, 1, &ok);
+    if (!ok || id == 0) return;
+    const QString name = QInputDialog::getText(this, QStringLiteral("Agregar recurso"), QStringLiteral("Nombre:"), QLineEdit::Normal);
+    if (name.trimmed().isEmpty()) return;
+    auto res = idDatabase_.resourceOverrides();
+    res[id] = name.trimmed();
+    idDatabase_.setResourceOverrides(res);
+    QString err;
+    if (!idDatabase_.saveToFile(IdDatabase::defaultStoragePath(), &err)) {
+        QMessageBox::warning(this, QStringLiteral("Guardar"), err);
+        return;
+    }
+    reloadIdDatabaseFromDisk();
+    refreshSavedResMonUi();
+}
+
+void MainWindow::addSavedMonsterDialog()
+{
+    bool ok = false;
+    const quint64 id = QInputDialog::getInt(this, QStringLiteral("Agregar monstruo"), QStringLiteral("ID:"), 0, 0, INT_MAX, 1, &ok);
+    if (!ok || id == 0) return;
+    const QString name = QInputDialog::getText(this, QStringLiteral("Agregar monstruo"), QStringLiteral("Nombre:"), QLineEdit::Normal);
+    if (name.trimmed().isEmpty()) return;
+    auto mon = idDatabase_.monsterNames();
+    mon[id] = name.trimmed();
+    idDatabase_.setMonsterNames(mon);
+    QString err;
+    if (!idDatabase_.saveToFile(IdDatabase::defaultStoragePath(), &err)) {
+        QMessageBox::warning(this, QStringLiteral("Guardar"), err);
+        return;
+    }
+    reloadIdDatabaseFromDisk();
+    refreshSavedResMonUi();
+}
+
+void MainWindow::removeSelectedSavedEntry()
+{
+    if (savedResMonTable_ == nullptr) return;
+    const int row = savedResMonTable_->currentRow();
+    if (row < 0) return;
+    auto* kindCell = savedResMonTable_->item(row, 0);
+    auto* idCell = savedResMonTable_->item(row, 1);
+    if (!kindCell || !idCell) return;
+    const QString kind = kindCell->text();
+    bool ok = false;
+    const quint64 id = idCell->text().toULongLong(&ok);
+    if (!ok || id == 0) return;
+    if (QMessageBox::question(this, QStringLiteral("Eliminar"),
+                              QStringLiteral("¿Eliminar %1 ID %2?").arg(kind).arg(id))
+        != QMessageBox::Yes) {
+        return;
+    }
+    if (kind == QStringLiteral("recurso")) {
+        auto res = idDatabase_.resourceOverrides();
+        res.remove(id);
+        idDatabase_.setResourceOverrides(res);
+        auto hx = idDatabase_.resourceCaptureHex();
+        hx.remove(id);
+        idDatabase_.setResourceCaptureHex(hx);
+    } else if (kind == QStringLiteral("monstruo")) {
+        auto mon = idDatabase_.monsterNames();
+        mon.remove(id);
+        idDatabase_.setMonsterNames(mon);
+        auto hx = idDatabase_.monsterCaptureHex();
+        hx.remove(id);
+        idDatabase_.setMonsterCaptureHex(hx);
+    } else {
+        return;
+    }
+    QString err;
+    if (!idDatabase_.saveToFile(IdDatabase::defaultStoragePath(), &err)) {
+        QMessageBox::warning(this, QStringLiteral("Guardar"), err);
+        return;
+    }
+    reloadIdDatabaseFromDisk();
+    refreshSavedResMonUi();
+}
+
+void MainWindow::exportGatheredResourcesCsvDialog()
+{
+    if (isoMapResourceTotals_.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("CSV"),
+                                 QStringLiteral("Sin datos agregados todavía (captura ISO primero)."));
+        return;
+    }
+    QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Exportar recursos en mapa actual"),
+        QDir(QCoreApplication::applicationDirPath())
+            .filePath(QStringLiteral("recursos_mapa_%1.csv").arg(lastMapGuess_ != 0
+                                                                    ? QString::number(lastMapGuess_)
+                                                                    : QLatin1String("sin_mapa"))),
+        QStringLiteral("CSV (*.csv);;Todos (*.*)"));
+    if (path.isEmpty()) {
+        return;
+    }
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        QMessageBox::warning(this, QStringLiteral("CSV"),
+                             QStringLiteral("No se pudo crear el archivo."));
+        return;
+    }
+    QTextStream sw(&f);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    sw.setEncoding(QStringConverter::Utf8);
+#else
+    sw.setCodec("UTF-8");
+#endif
+    sw << "map_id;recurso;cantidad\n";
+    const QString mapTok =
+        lastMapGuess_ != 0 ? QString::number(lastMapGuess_) : QLatin1String("desconocido");
+    for (auto it = isoMapResourceTotals_.constBegin(); it != isoMapResourceTotals_.constEnd(); ++it) {
+        sw << mapTok << QLatin1Char(';') << it.key() << QLatin1Char(';') << it.value() << QLatin1Char('\n');
+    }
+    f.close();
+    appendProxyLog(QStringLiteral("[CSV] Recursos exportados a %1")
+                       .arg(QDir::toNativeSeparators(path)));
+}
+
+void MainWindow::librarySearchAcrossExportedLogs()
+{
+    if (librarySearchEdit_ == nullptr || librarySearchResults_ == nullptr) {
+        return;
+    }
+    const QString needleRaw = librarySearchEdit_->text();
+    librarySearchResults_->clear();
+    if (needleRaw.trimmed().isEmpty()) {
+        return;
+    }
+    const QString needle = needleRaw.trimmed().toLower();
+    const QString dirPath =
+        QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("exported_logs"));
+    const QFileInfoList infos =
+        QDir(dirPath).entryInfoList(QStringList(QStringLiteral("*.txt")), QDir::Files);
+    constexpr int limitItems = 200;
+    int added = 0;
+    const QRegularExpression reNeedle(QRegularExpression::escape(needleRaw.trimmed()),
+                                    QRegularExpression::CaseInsensitiveOption);
+    for (const QFileInfo& fi : infos) {
+        if (added >= limitItems) {
+            break;
+        }
+        QFile f(fi.absoluteFilePath());
+        if (!f.open(QIODevice::ReadOnly)) {
+            continue;
+        }
+        qint64 lineno = 0;
+        QTextStream ss(&f);
+        while (!ss.atEnd()) {
+            const QString line = ss.readLine();
+            ++lineno;
+            if (line.contains(reNeedle) || line.toLower().contains(needle)) {
+                auto* it = new QListWidgetItem(QStringLiteral("%1:L%2: %3")
+                                                    .arg(fi.fileName())
+                                                    .arg(lineno)
+                                                    .arg(line.trimmed().left(160)));
+                it->setData(Qt::UserRole + 101, fi.absoluteFilePath());
+                librarySearchResults_->addItem(it);
+                ++added;
+                if (added >= limitItems) {
+                    break;
+                }
+            }
         }
     }
 }
 
+void MainWindow::importExportedLogFromPath(const QString& path)
+{
+    if (path.trimmed().isEmpty() || !QFile::exists(path)) {
+        QMessageBox::warning(this, QStringLiteral("Importar"), QStringLiteral("Archivo inválido o inexistente."));
+        return;
+    }
+    showImportLogPreviewDialog(path);
+}
+
+void MainWindow::updateIrxQuickClassifyUi(int vecIndex)
+{
+    if (irxClassifyFrame_ == nullptr || irxIdCombo_ == nullptr) {
+        return;
+    }
+    if (vecIndex < 0 || vecIndex >= protocolRecords_.size()) {
+        irxClassifyFrame_->setVisible(false);
+        return;
+    }
+    const ProtocolPacketRecord& rec = protocolRecords_[vecIndex];
+    if (rec.kind != PacketKind::IrxMonsters && rec.kind != PacketKind::IslEntities) {
+        irxClassifyFrame_->setVisible(false);
+        return;
+    }
+    IrxVarintBuckets b = classifyIrxStyleVarints(rec.numericIds);
+    irxIdCombo_->clear();
+    QList<quint64> prio;
+    prio += b.monsters;
+    prio += b.players;
+    prio += b.other;
+    prio += b.structure;
+    for (quint64 id : prio) {
+        QString tag;
+        if (id >= 1000000ULL) {
+            tag = QStringLiteral("≥1M");
+        } else if (id >= 1000ULL && id <= 9999ULL) {
+            tag = QStringLiteral("jug?");
+        } else if (id < 1000ULL) {
+            tag = QStringLiteral("est.");
+        }
+        irxIdCombo_->addItem(QStringLiteral("%1 — %2").arg(QString::number(id)).arg(tag),
+                             QString::number(id));
+    }
+    irxClassifyFrame_->setVisible(!prio.isEmpty());
+}
+
+void MainWindow::persistSelectedIrxId(bool asMonster)
+{
+    if (irxIdCombo_ == nullptr || irxNameEdit_ == nullptr) {
+        return;
+    }
+    bool ok = false;
+    const quint64 id = irxIdCombo_->currentData().toString().toULongLong(&ok);
+    if (!ok || id == 0) {
+        return;
+    }
+    QString name = irxNameEdit_->text().trimmed();
+    if (name.isEmpty()) {
+        name = asMonster ? QStringLiteral("Monstruo %1").arg(QString::number(id))
+                         : QStringLiteral("Personaje %1").arg(QString::number(id));
+    }
+    auto mon = idDatabase_.monsterNames();
+    auto pl = idDatabase_.playerNames();
+    if (asMonster) {
+        mon[id] = name;
+        pl.remove(id);
+    } else {
+        pl[id] = name;
+        mon.remove(id);
+    }
+    idDatabase_.setMonsterNames(mon);
+    idDatabase_.setPlayerNames(pl);
+
+    QString err;
+    if (!idDatabase_.saveToFile(IdDatabase::defaultStoragePath(), &err)) {
+        QMessageBox::warning(this, QStringLiteral("IDS"), err);
+        return;
+    }
+    reloadIdDatabaseFromDisk();
+    refreshProtocolDetailFromSelection();
+    if (protocolLogTree_ != nullptr && protocolLogTree_->currentItem() != nullptr) {
+        const int vix = protocolLogTree_->currentItem()->data(0, kProtoVecRole).toInt();
+        if (vix >= 0 && vix < protocolRecords_.size()) {
+            syncProtocolTreeItemFromRecord(vix);
+        }
+    }
+    refreshResourceCandidatesUi();
+    statusBar()->showMessage(QStringLiteral("ID %2 guardado como %1.")
+                                 .arg(asMonster ? QStringLiteral("monstruo") : QStringLiteral("personaje"))
+                                 .arg(id),
+                             4500);
+}
+
 void MainWindow::onProtocolPayloadCaptured(bool fromClient, const QByteArray& payload)
+{
+    if (protocolPauseTableCaptureChk_ != nullptr && protocolPauseTableCaptureChk_->isChecked()) {
+        return;
+    }
+    appendProtocolCaptureRecord(fromClient, payload);
+}
+
+void MainWindow::appendProtocolCaptureRecord(bool fromClient, const QByteArray& payload)
 {
     ++protocolPacketSeq_;
     ProtocolPacketRecord r = buildRecordFromPayload(protocolPacketSeq_, fromClient, payload, &packetTypeOverrides_);
@@ -3668,8 +5512,8 @@ void MainWindow::onProtocolPayloadCaptured(bool fromClient, const QByteArray& pa
     appendProtocolTreeItem(r, protocolRecords_.size() - 1);
     applyProtocolLogFilters();
 
-    if (r.kind == PacketKind::IsoResources) {
-        updateResourcesFromIsoPayload(payload);
+    if (packetKindFeedsResourceTotals(r.kind)) {
+        updateGatherablesFromProtobufPayload(payload, r.kind);
     }
 
     if (r.kind == PacketKind::IrxMonsters && monstersMapLbl_ != nullptr) {
@@ -3728,20 +5572,25 @@ void MainWindow::onClearProtocolLogClicked()
     if (protocolDetailText_ != nullptr) {
         protocolDetailText_->clear();
     }
+    isoMapResourceTotals_.clear();
+    resourceSessionSnapshots_.clear();
+    if (resourceSessionHistory_ != nullptr) {
+        resourceSessionHistory_->clear();
+    }
+    refreshIsoResourcesSummaryUi();
+    updateIrxQuickClassifyUi(-1);
     if (mapCurrentIdLbl_ != nullptr) {
         mapCurrentIdLbl_->setText(QStringLiteral("Mapa actual: —"));
     }
-    if (resourcesTable_ != nullptr) {
-        for (int i = 0; i < resourcesTable_->rowCount(); ++i) {
-            if (resourcesTable_->item(i, 1) != nullptr) {
-                resourcesTable_->item(i, 1)->setText(QStringLiteral("—"));
-            }
-            if (resourcesTable_->item(i, 2) != nullptr) {
-                resourcesTable_->item(i, 2)->setText(QStringLiteral("—"));
-            }
-        }
-    }
     refreshCharacterLabels();
+    resourceCandidateHits_.clear();
+    resourceCandidateInteractedHits_.clear();
+    resourceCandidateSeenOnMap_.clear();
+    resourceCandidateSourceHex_.clear();
+    resourceCandidateLastInteractMs_.clear();
+    resourceCandidateIntroLogLabel_.clear();
+    resourceCandidateInteractLogLabel_.clear();
+    refreshResourceCandidatesUi();
 }
 
 void MainWindow::onProtocolFilterChanged()
@@ -4211,13 +6060,19 @@ void MainWindow::onEditIdsClicked()
     for (quint64 k : idDatabase_.monsterNames().keys()) {
         idUnion.insert(k);
     }
+    for (quint64 k : idDatabase_.playerNames().keys()) {
+        idUnion.insert(k);
+    }
     for (quint64 k : idDatabase_.objectNames().keys()) {
         idUnion.insert(k);
     }
     for (quint64 k : idDatabase_.customNotesById().keys()) {
         idUnion.insert(k);
     }
-    QList<quint64> sorted = idUnion.values();
+    QList<quint64> sorted;
+    for (quint64 v : idUnion) {
+        sorted.append(v);
+    }
     std::sort(sorted.begin(), sorted.end());
     for (quint64 id : sorted) {
         const int row = tbl->rowCount();
@@ -4228,6 +6083,9 @@ void MainWindow::onEditIdsClicked()
         if (idDatabase_.monsterNames().contains(id)) {
             nom = idDatabase_.monsterNames().value(id);
             tipo = QStringLiteral("monstruo");
+        } else if (idDatabase_.playerNames().contains(id)) {
+            nom = idDatabase_.playerNames().value(id);
+            tipo = QStringLiteral("personaje");
         } else if (idDatabase_.resourceOverrides().contains(id)) {
             nom = idDatabase_.resourceOverrides().value(id);
             tipo = QStringLiteral("recurso");
@@ -4265,6 +6123,7 @@ void MainWindow::onEditIdsClicked()
 
     QHash<quint64, QString> resOut;
     QHash<quint64, QString> monOut;
+    QHash<quint64, QString> plOut;
     QHash<quint64, QString> objOut;
     QHash<quint64, QString> notesOut;
     for (int r = 0; r < tbl->rowCount(); ++r) {
@@ -4284,6 +6143,8 @@ void MainWindow::onEditIdsClicked()
 
         if (tipo == QStringLiteral("monstruo") && !name.isEmpty()) {
             monOut.insert(id, name);
+        } else if (tipo == QStringLiteral("personaje") && !name.isEmpty()) {
+            plOut.insert(id, name);
         } else if (tipo == QStringLiteral("objeto") && !name.isEmpty()) {
             objOut.insert(id, name);
         } else if (!name.isEmpty()) {
@@ -4297,6 +6158,7 @@ void MainWindow::onEditIdsClicked()
     IdDatabase next;
     next.setResourceOverrides(resOut);
     next.setMonsterNames(monOut);
+    next.setPlayerNames(plOut);
     next.setObjectNames(objOut);
     next.setCustomNotes(notesOut);
     QString err;
