@@ -8,6 +8,7 @@
 #include <QHostAddress>
 #include <QHostInfo>
 #include <QRegularExpression>
+#include <QStringList>
 #include <QTimer>
 #include <QtGlobal>
 
@@ -632,7 +633,39 @@ void TcpMitmProxy::onAutoUpstreamWatchTick()
         return;
     }
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-    if (!handoffPreferredHost_.isEmpty() && handoffPreferredPort_ > 0 && nowMs < handoffPreferredUntilMs_) {
+    // La ventana de 30s caduca, pero el TCP sigue siendo el GA: si dejamos pasar, el tick siguiente lee el log DLL
+    // (IP del CO) y hace «upstream cambió en caliente» → abort() → túnel muerto ~30s post-handoff (coincide con
+    // timeouts de diagnóstico). Mientras el peer real coincida con el GA de handoff, no pisar con CO del log.
+    const bool handoffWindowOpen = !handoffPreferredHost_.isEmpty() && handoffPreferredPort_ > 0
+        && nowMs < handoffPreferredUntilMs_;
+    const bool gaTcpSessionLocked = (upstream_.state() == QAbstractSocket::ConnectedState)
+        && !handoffPreferredHost_.isEmpty() && handoffPreferredPort_ > 0
+        && (upstream_.peerAddress().toString() == handoffPreferredHost_)
+        && (upstream_.peerPort() == handoffPreferredPort_);
+    if (fullDiagnosticMode_) {
+        const QString peerStr = upstream_.state() == QAbstractSocket::ConnectedState
+                                    ? upstream_.peerAddress().toString()
+                                    : QStringLiteral("(n/a)");
+        const quint16 peerPortVal =
+            upstream_.state() == QAbstractSocket::ConnectedState ? upstream_.peerPort() : quint16(0);
+        logDiag(QStringLiteral(
+            "[UPSTREAM-WATCH] tick · upState=%1 gaHandoffFlag=%2 · handoffWindow=%3 until=%4 now=%5 · "
+            "pref=%6:%7 · peer=%8:%9 · gaTcpLocked=%10 · remote=%11:%12 · lastAuto=%13")
+                    .arg(int(upstream_.state()))
+                    .arg(gaHandoffDetected_)
+                    .arg(handoffWindowOpen)
+                    .arg(handoffPreferredUntilMs_)
+                    .arg(nowMs)
+                    .arg(handoffPreferredHost_.isEmpty() ? QStringLiteral("(vacío)") : handoffPreferredHost_)
+                    .arg(handoffPreferredPort_)
+                    .arg(peerStr)
+                    .arg(peerPortVal)
+                    .arg(gaTcpSessionLocked)
+                    .arg(remoteHost_)
+                    .arg(remotePort_)
+                    .arg(lastAutoUpstreamHost_.isEmpty() ? QStringLiteral("(vacío)") : lastAutoUpstreamHost_));
+    }
+    if (handoffWindowOpen || gaTcpSessionLocked) {
         if (remoteHost_ != handoffPreferredHost_ || remotePort_ != handoffPreferredPort_) {
             remoteHost_ = handoffPreferredHost_;
             remotePort_ = handoffPreferredPort_;
@@ -640,22 +673,36 @@ void TcpMitmProxy::onAutoUpstreamWatchTick()
                              .arg(remoteHost_)
                              .arg(remotePort_));
         }
+        if (fullDiagnosticMode_) {
+            logDiag(QStringLiteral("[UPSTREAM-WATCH] salida temprana: handoffWindow=%1 gaTcpSessionLocked=%2")
+                        .arg(handoffWindowOpen)
+                        .arg(gaTcpSessionLocked));
+        }
         return;
     }
     QString autoHost;
     quint16 autoPort = 0;
+    QString autoSource;
     if (tryUpstreamFromDllRedirectLog(&autoHost, &autoPort)) {
         if (autoPort == 0) {
             autoPort = 5555;
         }
+        autoSource = QStringLiteral("dofus_redirect_log Redirect IPv4 (última coincidencia)");
     } else if (tryResolveUpstreamFromDllHostName(&autoHost, &autoPort)) {
-        // Resuelto por DNS a partir del host original (production/beta) del log DLL.
+        autoSource = QStringLiteral("dofus_redirect_log hostname → DNS");
     } else if (tryUpstreamFromSharedIpFile(&autoHost)) {
         autoPort = 5555;
+        autoSource = QStringLiteral("C:\\dofus_upstream_ip.txt");
     } else {
         return;
     }
     const quint16 newPort = autoPort;
+    if (fullDiagnosticMode_) {
+        logDiag(QStringLiteral("[UPSTREAM-WATCH] auto-detección fuente=%1 → %2:%3")
+                    .arg(autoSource)
+                    .arg(autoHost)
+                    .arg(newPort));
+    }
     if (autoHost == remoteHost_ && newPort == remotePort_ && autoHost == lastAutoUpstreamHost_) {
         return;
     }
@@ -666,7 +713,8 @@ void TcpMitmProxy::onAutoUpstreamWatchTick()
     lastAutoUpstreamHost_ = autoHost;
 
     if (changed) {
-        emit logLine(QStringLiteral("[PROXY] Upstream auto-detectado: %1:%2")
+        emit logLine(QStringLiteral("[PROXY] Upstream auto-detectado (%1): %2:%3")
+                         .arg(autoSource)
                          .arg(remoteHost_)
                          .arg(remotePort_));
     }
@@ -681,6 +729,36 @@ void TcpMitmProxy::onAutoUpstreamWatchTick()
         if (peer == remoteHost_ && pport == remotePort_) {
             return;
         }
+        // Handoff CO→GA: ya actualizamos remoteHost_ al GA desde el payload S→C, pero el TCP sigue siendo
+        // la sesión al CO hasta que el servidor cierre. Abortar aquí rompe el intercambio y provoca
+        // reconexiones erráticas / SocketError=1 (RemoteHostClosedError).
+        if (gaHandoffDetected_) {
+            if (fullDiagnosticMode_) {
+                logDiag(QStringLiteral(
+                    "[UPSTREAM-WATCH] sin abort: gaHandoffDetected_=true (sesión CO aún relevante) peer=%1:%2")
+                            .arg(peer)
+                            .arg(pport));
+            }
+            return;
+        }
+        const bool prefEmpty = handoffPreferredHost_.isEmpty() || handoffPreferredPort_ <= 0;
+        const bool windowOpen = !prefEmpty && nowMs < handoffPreferredUntilMs_;
+        const bool peerMatchesPref = !prefEmpty && peer == handoffPreferredHost_ && pport == handoffPreferredPort_;
+        emit logLine(QStringLiteral(
+            "[PROXY][UPSTREAM-WATCH] Cambio en caliente → abort · ventanaHandoff=%1 untilMs=%2 now=%3 · "
+            "peerVsPref locked=%4 (%5:%6 vs %7:%8) · gaHandoffDetected=%9 · fuente=%10 → destino %11:%12")
+                         .arg(windowOpen)
+                         .arg(handoffPreferredUntilMs_)
+                         .arg(nowMs)
+                         .arg(peerMatchesPref)
+                         .arg(peer)
+                         .arg(pport)
+                         .arg(prefEmpty ? QStringLiteral("(vacío)") : handoffPreferredHost_)
+                         .arg(handoffPreferredPort_)
+                         .arg(gaHandoffDetected_)
+                         .arg(autoSource)
+                         .arg(remoteHost_)
+                         .arg(remotePort_));
         emit logLine(QStringLiteral(
             "[PROXY] Upstream cambió en caliente (%1:%2 -> %3:%4). Reconectando túnel...")
                          .arg(peer)
@@ -1021,6 +1099,8 @@ void TcpMitmProxy::onNewConnection()
             emit logLine(QStringLiteral("[PROXY] Upstream fijado por handoff CO→GA: %1:%2")
                              .arg(remoteHost_)
                              .arg(remotePort_));
+            // No limpiar handoffPreferred* aquí: el watcher usa esos campos (p. ej. gaTcpSessionLocked) para no
+            // «corregir» el upstream con una IP CO obsoleta del log DLL tras reconectar al GA.
         } else {
             QString autoHost;
             quint16 autoPort = 0;
@@ -1261,15 +1341,38 @@ void TcpMitmProxy::pumpUpstreamClient()
     if (tryExtractGaHostFromPayload(d, &gaHost)) {
         QString gaIp;
         if (tryResolveNonLoopbackIpv4(gaHost, &gaIp)) {
+            if (fullDiagnosticMode_) {
+                const QHostInfo gaInfo = QHostInfo::fromName(gaHost);
+                QStringList v4List;
+                for (const QHostAddress& a : gaInfo.addresses()) {
+                    if (a.protocol() == QHostAddress::IPv4Protocol && !a.isLoopback()) {
+                        v4List.append(a.toString());
+                    }
+                }
+                logDiag(QStringLiteral("[HANDOFF-GA] DNS %1 · error=%2 · IPv4 candidatas (%3): %4 · elegida=%5")
+                            .arg(gaHost)
+                            .arg(int(gaInfo.error()))
+                            .arg(v4List.size())
+                            .arg(v4List.isEmpty() ? QStringLiteral("(ninguna)") : v4List.join(QStringLiteral(", ")))
+                            .arg(gaIp));
+            }
             const quint16 gaPort = 5555;
             const bool changed = (remoteHost_ != gaIp) || (remotePort_ != gaPort);
             remoteHost_ = gaIp;
             remotePort_ = gaPort;
             lastAutoUpstreamHost_ = gaIp;
-            gaHandoffDetected_ = true;
+            // Solo marcar handoff si el TCP upstream aún no es la sesión GA (el payload suele repetir el hostname
+            // en tráfico posterior; flag mal puesto → teardown/reintentos erráticos).
+            const bool upstreamAlreadyGa = (upstream_.state() == QAbstractSocket::ConnectedState)
+                && (upstream_.peerAddress().toString() == gaIp) && (upstream_.peerPort() == gaPort);
+            if (!upstreamAlreadyGa) {
+                gaHandoffDetected_ = true;
+            }
             handoffPreferredHost_ = gaIp;
             handoffPreferredPort_ = gaPort;
-            handoffPreferredUntilMs_ = QDateTime::currentMSecsSinceEpoch() + 30000;
+            // Ventana amplia: el cliente suele abrir un segundo TCP a :5555 poco después (ver log DLL GA); si es
+            // demasiado corta, onNewConnection pierde el hint GA antes de reconectar.
+            handoffPreferredUntilMs_ = QDateTime::currentMSecsSinceEpoch() + 120000;
             emit logLine(QStringLiteral("[PROXY] Handoff detectado: host %1 -> %2:%3%4")
                              .arg(gaHost)
                              .arg(remoteHost_)
@@ -1285,6 +1388,13 @@ void TcpMitmProxy::pumpUpstreamClient()
     appendHandshakeCapture(false, d);
     queueToClient_.append(d);
     drainQueueToClient();
+    // Renovar ventana del hint GA mientras el TCP upstream es ya la sesión GA (partidas largas).
+    if (upstream_.state() == QAbstractSocket::ConnectedState && !handoffPreferredHost_.isEmpty()
+        && handoffPreferredPort_ > 0
+        && upstream_.peerAddress().toString() == handoffPreferredHost_
+        && upstream_.peerPort() == handoffPreferredPort_) {
+        handoffPreferredUntilMs_ = QDateTime::currentMSecsSinceEpoch() + 120000;
+    }
     if (fullDiagnosticMode_) {
         logDiag(QStringLiteral("S→C: leídos %1 B del upstream; hacia cliente cola %2 B (mismo payload, sin alterar).")
                     .arg(d.size())
@@ -1321,7 +1431,41 @@ void TcpMitmProxy::teardown(const QString& reason)
         flushHandshakeCaptureToFile(reason);
     }
     upstreamAutoRetriesLeft_ = 0;
+    const QString hintHostBefore = handoffPreferredHost_;
+    const quint16 hintPortBefore = handoffPreferredPort_;
+    const qint64 hintUntilBefore = handoffPreferredUntilMs_;
+    const qint64 nowSnap = QDateTime::currentMSecsSinceEpoch();
+    const bool hintStillFresh = !handoffPreferredHost_.isEmpty() && handoffPreferredPort_ > 0
+        && nowSnap < handoffPreferredUntilMs_;
+    const bool preserveHandoffTeardown =
+        reason.contains(QStringLiteral("handoff CO→GA (nuevo TCP"));
+    // Tras cerrar el cliente, antes se borraba el hint: la siguiente conexión volvía al CO en DNS → segundo intento.
+    const bool preserveClientCloseHint =
+        reason.contains(QStringLiteral("cliente local cerró")) && hintStillFresh;
+    const bool preserveGaHint = preserveHandoffTeardown || preserveClientCloseHint;
     gaHandoffDetected_ = false;
+    // Tras handoff CO→GA el siguiente upstream válido lo negocia un TCP nuevo; conservamos el hint GA.
+    if (!preserveGaHint) {
+        handoffPreferredHost_.clear();
+        handoffPreferredPort_ = 0;
+        handoffPreferredUntilMs_ = 0;
+    }
+    QString hintNote = QStringLiteral("limpiado");
+    if (preserveHandoffTeardown) {
+        hintNote = QStringLiteral("conservado (handoff CO→GA)");
+    } else if (preserveClientCloseHint) {
+        hintNote = QStringLiteral("conservado (cliente cerró, ventana GA aún válida)");
+    }
+    emit logLine(QStringLiteral(
+        "[PROXY][SESSION] teardown «%1»: hint GA %2 · antes %3:%4 untilMs=%5 · después %6:%7 untilMs=%8")
+                     .arg(reason)
+                     .arg(hintNote)
+                     .arg(hintHostBefore.isEmpty() ? QStringLiteral("—") : hintHostBefore)
+                     .arg(hintPortBefore)
+                     .arg(hintUntilBefore)
+                     .arg(handoffPreferredHost_.isEmpty() ? QStringLiteral("—") : handoffPreferredHost_)
+                     .arg(handoffPreferredPort_)
+                     .arg(handoffPreferredUntilMs_));
     if (client_) {
         disconnect(client_, nullptr, this, nullptr);
         client_->deleteLater();
@@ -1355,19 +1499,27 @@ void TcpMitmProxy::onUpstreamDisconnected()
     emit logLine(QStringLiteral("[PROXY] Evento: upstream desconectado · QAbstractSocket::SocketError=%1 — %2")
                      .arg(se)
                      .arg(err.isEmpty() ? QStringLiteral("(sin texto)") : err));
-    emit tunnelReadyChanged(false);
 
     if (echoMode_) {
+        emit tunnelReadyChanged(false);
         return;
     }
 
     if (gaHandoffDetected_) {
         gaHandoffDetected_ = false;
         emit logLine(QStringLiteral(
-            "[PROXY] Cierre upstream tras handoff CO→GA detectado: se cierra sesión local para forzar reconexión limpia del cliente."));
-        teardown(QStringLiteral("handoff CO→GA (reconexión limpia)"));
+            "[PROXY] Handoff CO→GA: el servidor CO cerró el enlace; se corta el TCP local para que el cliente "
+            "abra una sesión nueva hacia GA en 127.0.0.1:5555 (no se reusa el mismo socket que habló con el CO)."));
+        emit tunnelReadyChanged(false);
+        if (!upstreamEndpointUsable()) {
+            teardown(QStringLiteral("handoff CO→GA sin endpoint GA válido"));
+            return;
+        }
+        teardown(QStringLiteral("handoff CO→GA (nuevo TCP cliente→GA)"));
         return;
     }
+
+    emit tunnelReadyChanged(false);
 
     if (client_->state() == QAbstractSocket::ConnectedState && upstreamAutoRetriesLeft_ > 0
         && upstreamEndpointUsable()) {
