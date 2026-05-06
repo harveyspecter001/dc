@@ -503,20 +503,47 @@ MainWindow::MainWindow(QWidget* parent)
     arrowS_btn_->setEnabled(false);
     arrowE_btn_->setEnabled(false);
     arrowO_btn_->setEnabled(false);
-    connect(arrowN_btn_, &QPushButton::clicked, this,
-            [this]() { applyCardinal(QStringLiteral("Norte")); });
-    connect(arrowS_btn_, &QPushButton::clicked, this,
-            [this]() { applyCardinal(QStringLiteral("Sur")); });
-    connect(arrowE_btn_, &QPushButton::clicked, this,
-            [this]() { applyCardinal(QStringLiteral("Este")); });
-    connect(arrowO_btn_, &QPushButton::clicked, this,
-            [this]() { applyCardinal(QStringLiteral("Oeste")); });
+    // N/S/E/O: cambio de mapa por macro (por mapa+dirección), no ☆iri.
+    connect(arrowN_btn_, &QPushButton::clicked, this, [this]() { applyMapTransitDir(QStringLiteral("Norte")); });
+    connect(arrowS_btn_, &QPushButton::clicked, this, [this]() { applyMapTransitDir(QStringLiteral("Sur")); });
+    connect(arrowE_btn_, &QPushButton::clicked, this, [this]() { applyMapTransitDir(QStringLiteral("Este")); });
+    connect(arrowO_btn_, &QPushButton::clicked, this, [this]() { applyMapTransitDir(QStringLiteral("Oeste")); });
     auto* arrowLay = new QGridLayout;
     arrowLay->addWidget(arrowN_btn_, 0, 0);
     arrowLay->addWidget(arrowS_btn_, 0, 1);
     arrowLay->addWidget(arrowO_btn_, 1, 0);
     arrowLay->addWidget(arrowE_btn_, 1, 1);
     pmLay->addLayout(arrowLay);
+
+    {
+        auto* recRow = new QHBoxLayout;
+        recordNorthBtn_ = new QPushButton(QStringLiteral("⏺ REC Norte"));
+        recordSouthBtn_ = new QPushButton(QStringLiteral("⏺ REC Sur"));
+        recordEastBtn_ = new QPushButton(QStringLiteral("⏺ REC Este"));
+        recordWestBtn_ = new QPushButton(QStringLiteral("⏺ REC Oeste"));
+        for (auto* b : {recordNorthBtn_, recordSouthBtn_, recordEastBtn_, recordWestBtn_}) {
+            if (b == nullptr) {
+                continue;
+            }
+            b->setToolTip(QStringLiteral(
+                "Arma una grabación: el próximo cambio de mapa detectado (ITR→ITO→PASO MAPA) se guardará como macro "
+                "para el mapa origen actual y esta dirección."));
+        }
+        recordMoveStatusLbl_ = new QLabel(QStringLiteral("REC: apagado"));
+        recordMoveStatusLbl_->setStyleSheet(QStringLiteral("color:#9ca3af;font-size:12px;"));
+        recRow->addWidget(recordNorthBtn_);
+        recRow->addWidget(recordSouthBtn_);
+        recRow->addWidget(recordEastBtn_);
+        recRow->addWidget(recordWestBtn_);
+        recRow->addWidget(recordMoveStatusLbl_);
+        recRow->addStretch(1);
+        pmLay->addLayout(recRow);
+
+        connect(recordNorthBtn_, &QPushButton::clicked, this, [this]() { armRecordMoveDir(QStringLiteral("Norte")); });
+        connect(recordSouthBtn_, &QPushButton::clicked, this, [this]() { armRecordMoveDir(QStringLiteral("Sur")); });
+        connect(recordEastBtn_, &QPushButton::clicked, this, [this]() { armRecordMoveDir(QStringLiteral("Este")); });
+        connect(recordWestBtn_, &QPushButton::clicked, this, [this]() { armRecordMoveDir(QStringLiteral("Oeste")); });
+    }
 
     pmLay->addWidget(new QLabel(QStringLiteral(
         "<b>Cambio de mapa</b> — macro C→S (ITR · ITO · PASO MAPA con JNR+ISP). «☆iri» sigue solo para "
@@ -2058,6 +2085,179 @@ void MainWindow::applyCardinal(const QString& cardinalEs)
     appendProxyLog(QStringLiteral("[MOV] %1 · base=(%2) · %3").arg(cardinalEs, srcDesc, dbg));
 }
 
+void MainWindow::startMapTransitMacroReplay(const QVector<QByteArray>& steps,
+                                            const QString& whyLogLabel,
+                                            const QVector<int>& delaysMs)
+{
+    if (mapMacroReplayActive_) {
+        QMessageBox::information(this, QStringLiteral("Cambio de mapa"),
+                                 QStringLiteral("Ya hay una reproducción en curso."));
+        return;
+    }
+    if (transparentProxyChk_ != nullptr && transparentProxyChk_->isChecked()) {
+        QMessageBox::information(this, QStringLiteral("Modo transparente"),
+                                 QStringLiteral("Desactivá «Modo transparente» para inyectar el cambio de mapa."));
+        return;
+    }
+    if (proxy_ == nullptr) {
+        return;
+    }
+    if (steps.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Cambio de mapa"),
+                             QStringLiteral("No hay pasos para inyectar (macro vacía)."));
+        return;
+    }
+
+    QVector<QByteArray> queue;
+    queue.reserve(steps.size());
+    for (const QByteArray& pl : steps) {
+        if (!pl.isEmpty()) {
+            queue.push_back(pl);
+        }
+    }
+    if (queue.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Cambio de mapa"),
+                             QStringLiteral("No hay payloads válidos para inyectar."));
+        return;
+    }
+
+    mapMacroReplayQueue_ = std::move(queue);
+    mapMacroReplayNextIndex_ = 0;
+    mapMacroReplayDelayMs_ =
+        mapTransitMacroDelaySpin_ != nullptr ? qBound(0, mapTransitMacroDelaySpin_->value(), 60000) : 250;
+    mapMacroReplayDelaysMs_.clear();
+    if (!delaysMs.isEmpty()) {
+        mapMacroReplayDelaysMs_ = delaysMs;
+    }
+    mapMacroReplayActive_ = true;
+    refreshMovementButtonsEnabled();
+
+    appendProxyLog(QStringLiteral("[MAP-N] %1 — %2 pasos, pausa %3 ms.")
+                       .arg(whyLogLabel)
+                       .arg(mapMacroReplayQueue_.size())
+                       .arg(mapMacroReplayDelayMs_));
+    continueMapMacroReplayChain();
+}
+
+void MainWindow::applyMapTransitDir(const QString& dirEs)
+{
+    // Macro “de fábrica” tomada de un log real (2 mapas hacia arriba). Sirve de fallback.
+    // Si durante la sesión vemos ITR/ITO/JNR+ISP reales, se reemplaza automáticamente en memoria.
+    static const QVector<QByteArray> kFallback{
+        QByteArray::fromHex(
+            "24222208FFFFFFFFFFFFFFFFFF0112150A13747970652E616E6B616D612E636F6D2F697472"),
+        QByteArray::fromHex(
+            "2B222908FFFFFFFFFFFFFFFFFF01121C0A13747970652E616E6B616D612E636F6D2F69746F1205088590B05A"),
+        QByteArray::fromHex(
+            "2B222908FFFFFFFFFFFFFFFFFF01121C0A13747970652E616E6B616D612E636F6D2F6A6E721205108590B05A"
+            "2B222908FFFFFFFFFFFFFFFFFF01121C0A13747970652E616E6B616D612E636F6D2F6973701205188590B05A"),
+    };
+
+    const quint64 mapNow = lastMapGuess_;
+    if (mapNow != 0 && mapTransitByStartMapDir_.contains(mapNow)
+        && mapTransitByStartMapDir_.value(mapNow).contains(dirEs)) {
+        const QVector<QByteArray> steps = mapTransitByStartMapDir_.value(mapNow).value(dirEs);
+        const QVector<int> delays = mapTransitDelaysByStartMapDir_.value(mapNow).value(dirEs);
+        startMapTransitMacroReplay(steps,
+                                   QStringLiteral("macro %1 aprendida para mapa %2").arg(dirEs, QString::number(mapNow)),
+                                   delays);
+        return;
+    }
+
+    // Fallback: usa la última macro aprendida (aunque sea de otro mapa) o la de fábrica.
+    appendProxyLog(QStringLiteral("[MAP] ⚠ No hay macro para «%1» en el mapa actual (%2).")
+                       .arg(dirEs)
+                       .arg(mapNow != 0 ? QString::number(mapNow) : QStringLiteral("—")));
+    startMapTransitMacroReplay(kFallback, QStringLiteral("fallback (solo diagnóstico)"));
+}
+
+void MainWindow::armRecordMoveDir(const QString& dirEs)
+{
+    if (dirEs.isEmpty()) {
+        return;
+    }
+    recordMoveArmed_ = true;
+    recordMoveDirEs_ = dirEs;
+    if (recordMoveStatusLbl_ != nullptr) {
+        recordMoveStatusLbl_->setText(QStringLiteral("REC %1: ARMANDO (esperando ITR→ITO→PASO MAPA)")
+                                          .arg(dirEs));
+        recordMoveStatusLbl_->setStyleSheet(QStringLiteral("color:#fbbf24;font-size:12px;"));
+    }
+    // limpiar buffers para asegurar que grabamos el próximo cambio completo
+    mapTransitLastItr_.clear();
+    mapTransitLastIto_.clear();
+    mapTransitLastHop_.clear();
+    mapTransitLastItrMs_ = 0;
+    mapTransitLastItoMs_ = 0;
+    mapTransitLastHopMs_ = 0;
+    mapTransitPendingStartMap_ = lastMapGuess_;
+    appendProxyLog(QStringLiteral("[MAP] REC %1 armado. Mapa origen actual: %2")
+                       .arg(dirEs)
+                       .arg(lastMapGuess_ != 0 ? QString::number(lastMapGuess_) : QStringLiteral("—")));
+}
+
+void MainWindow::maybeLearnMapTransitMacro(const ProtocolPacketRecord& r)
+{
+    if (!r.fromClient) {
+        return;
+    }
+    if (!packetKindIsClientMapTransitMacro(r.kind)) {
+        return;
+    }
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (r.kind == PacketKind::ItrMapTransitClient) {
+        mapTransitLastItr_ = r.rawPayload;
+        mapTransitLastItrMs_ = now;
+        mapTransitPendingStartMap_ = lastMapGuess_;
+    } else if (r.kind == PacketKind::ItoMapTransitClient) {
+        mapTransitLastIto_ = r.rawPayload;
+        mapTransitLastItoMs_ = now;
+    } else if (r.kind == PacketKind::MapHopJnrIspClient) {
+        mapTransitLastHop_ = r.rawPayload;
+        mapTransitLastHopMs_ = now;
+    }
+
+    // Ventana corta: si vimos los 3 pasos muy juntos, asumimos que es un "cambio de mapa" completo.
+    const qint64 kWindowMs = 3500;
+    if (mapTransitLastItr_.isEmpty() || mapTransitLastIto_.isEmpty() || mapTransitLastHop_.isEmpty()) {
+        return;
+    }
+    if ((now - mapTransitLastItrMs_) > kWindowMs || (now - mapTransitLastItoMs_) > kWindowMs
+        || (now - mapTransitLastHopMs_) > kWindowMs) {
+        return;
+    }
+
+    QVector<QByteArray> learned{mapTransitLastItr_, mapTransitLastIto_, mapTransitLastHop_};
+    // Tamaños esperados (heurístico). Evita “aprender” basura parcial.
+    if (learned.at(0).size() < 20 || learned.at(1).size() < 20 || learned.at(2).size() < 40) {
+        return;
+    }
+
+    if (recordMoveArmed_ && mapTransitPendingStartMap_ != 0 && !recordMoveDirEs_.isEmpty()) {
+        mapTransitByStartMapDir_[mapTransitPendingStartMap_][recordMoveDirEs_] = learned;
+        // Delays aprendidos: ITR→ITO y ITO→HOP.
+        const qint64 rawD1 = mapTransitLastItoMs_ - mapTransitLastItrMs_;
+        const qint64 rawD2 = mapTransitLastHopMs_ - mapTransitLastItoMs_;
+        const int d1 = int(qBound<qint64>(0LL, rawD1, 60000LL));
+        const int d2 = int(qBound<qint64>(0LL, rawD2, 60000LL));
+        mapTransitDelaysByStartMapDir_[mapTransitPendingStartMap_][recordMoveDirEs_] = QVector<int>{d1, d2};
+
+        if (recordMoveStatusLbl_ != nullptr) {
+            recordMoveStatusLbl_->setText(QStringLiteral("REC %1: guardado para mapa %2")
+                                              .arg(recordMoveDirEs_, QString::number(mapTransitPendingStartMap_)));
+            recordMoveStatusLbl_->setStyleSheet(QStringLiteral("color:#4ade80;font-size:12px;"));
+        }
+        appendProxyLog(QStringLiteral("[MAP] REC completado: %1 guardado para mapa %2 (delays %3 ms, %4 ms).")
+                           .arg(recordMoveDirEs_)
+                           .arg(QString::number(mapTransitPendingStartMap_))
+                           .arg(d1)
+                           .arg(d2));
+        recordMoveArmed_ = false;
+        recordMoveDirEs_.clear();
+    }
+}
+
 QString MainWindow::movementInjectionPrecheck(const QByteArray& patched, const QByteArray& liveOptional) const
 {
     const DirectionMapModel* mdl = iriEmu_.model();
@@ -2292,11 +2492,19 @@ void MainWindow::continueMapMacroReplayChain()
         refreshMovementButtonsEnabled();
         return;
     }
+    // Registrar en Logs para poder exportar/diagnosticar lo inyectado.
+    appendProtocolCaptureRecord(true, pl);
     appendProxyLog(QStringLiteral("[MAP-MACRO] Paso %1/%2 (%3 B)")
                        .arg(stepNo)
                        .arg(mapMacroReplayQueue_.size())
                        .arg(pl.size()));
-    QTimer::singleShot(mapMacroReplayDelayMs_, this, &MainWindow::continueMapMacroReplayChain);
+    int nextDelay = mapMacroReplayDelayMs_;
+    // delaysMs_ tiene tamaño (steps-1): delay entre 1->2, 2->3, ...
+    const int delayIndex = stepNo - 1;
+    if (delayIndex >= 0 && delayIndex < mapMacroReplayDelaysMs_.size()) {
+        nextDelay = qBound(0, mapMacroReplayDelaysMs_.at(delayIndex), 60000);
+    }
+    QTimer::singleShot(nextDelay, this, &MainWindow::continueMapMacroReplayChain);
 }
 
 void MainWindow::refreshIriDiagnostics()
@@ -2384,15 +2592,20 @@ void MainWindow::onImportMovementLogClicked()
         a = analyzeIriPayload(raw, iriEmu_.model());
     }
 
+    quint64 iriMapId = 0;
+    const bool haveMapId = tryGetIriMapId(raw, iriMapId);
+
     const QString pktStr = pktNum >= 0 ? QString::number(pktNum) : QStringLiteral("?");
     const QString summary =
         QStringLiteral("Paquete #%1\n"
                        "· Tamaño: %2 B\n"
-                       "· Token (ofs 17): %3\n"
-                       "· Bytes de ruta (desde índice 22): %4\n"
-                       "· Cardinal inferido (JSON): %5\n")
+                       "· map_id (field 2): %3\n"
+                       "· Token (ofs 17): %4\n"
+                       "· Bytes de ruta (desde índice 22): %5\n"
+                       "· Cardinal inferido (JSON): %6\n")
             .arg(pktStr,
                  QString::number(a.payloadSize),
+                 haveMapId ? QString::number(iriMapId) : QStringLiteral("(no extraído)"),
                  formatSessionTokenHex(a.sessionToken5),
                  QString::number(a.routeByteCount),
                  a.inferredCardinal.isEmpty() ? QStringLiteral("—") : a.inferredCardinal);
@@ -3365,6 +3578,33 @@ QString MainWindow::buildProtocolPacketDetailHtml(const ProtocolPacketRecord& re
         html += QStringLiteral("</p>");
     }
 
+    if (rec.kind == PacketKind::ItxMapHeavyServer) {
+        const QList<ResourceInfo> lst = extractResourcesFromItx(rec.rawPayload);
+        if (!lst.isEmpty()) {
+            html += QStringLiteral("<p><b style=\"color:#fde68a;\">🌾 RECURSOS EN MAPA (ITX)</b></p>");
+            QString block;
+            for (const ResourceInfo& ri : lst) {
+                block += QStringLiteral("   • type_id: %1, instance_id: %2")
+                             .arg(ri.typeId)
+                             .arg(ri.instanceId);
+                if (ri.hasCell) {
+                    block += QStringLiteral(", cell: %1").arg(ri.cell);
+                }
+                block += QLatin1Char('\n');
+                if (block.size() > 8000) {
+                    block += QStringLiteral("   … (truncado)\n");
+                    break;
+                }
+            }
+            html += QStringLiteral("<pre style=\"white-space:pre-wrap;font-family:Consolas,monospace;"
+                                   "font-size:10pt;color:#fde68a;background:#0b1220;padding:8px;"
+                                   "border:1px solid #1f2937;border-radius:8px;\">%1</pre>")
+                        .arg(block.toHtmlEscaped());
+        } else {
+            html += QStringLiteral("<p style=\"color:#64748b;\">🌾 ITX: no se pudieron extraer recursos (heurística).</p>");
+        }
+    }
+
     // Protobuf wire-format (best-effort). No requiere .proto; solo tag/wire types con heurística.
     {
         const QString ctx = !rec.primaryUrl.isEmpty()
@@ -4082,7 +4322,8 @@ void MainWindow::exportSelectedPackages()
         const ProtocolPacketRecord& rec = protocolRecords_[ir.vecIndex];
         out << "========================================\n";
         out << "EXPORT paquete #" << rec.index << "\n";
-        out << buildPacketAnalysisText(rec, rules, 512, notes);
+        // En export, guardar HEX completo (no truncado) para poder estudiar el payload.
+        out << buildPacketAnalysisText(rec, rules, rec.rawPayload.size(), notes);
         out << "\n";
     }
     f.close();
@@ -4299,7 +4540,8 @@ void MainWindow::exportSelectedPacketAsJsonOrTxt()
         return;
     }
     if (path.endsWith(QLatin1String(".txt"), Qt::CaseInsensitive)) {
-        const QString body = buildPacketAnalysisText(rec, mergedAliasRulesForAnalysis(), 512,
+        // En export, guardar HEX completo (no truncado) para poder estudiar el payload.
+        const QString body = buildPacketAnalysisText(rec, mergedAliasRulesForAnalysis(), rec.rawPayload.size(),
                                                      &idDatabase_.customNotesById());
         f.write(QStringLiteral("EXPORT paquete #%1\n%2").arg(rec.index).arg(body).toUtf8());
     } else {
@@ -5636,6 +5878,23 @@ void MainWindow::appendProtocolCaptureRecord(bool fromClient, const QByteArray& 
     protocolRecords_.push_back(r);
     appendProtocolTreeItem(r, protocolRecords_.size() - 1);
     applyProtocolLogFilters();
+
+    // Mapa actual: preferir extracción explícita ISA/ITX (ID largo ~189792xxx) sobre heurística.
+    // Esto evita depender de IDs de destino embebidos en ITO/JNR+ISP cuando grabamos macros.
+    {
+        quint64 mid = 0;
+        if (tryExtractMapIdLongFromIsaOrItx(payload, mid)) {
+            if (mid != 0 && mid != lastMapGuess_) {
+                lastMapGuess_ = mid;
+                if (mapCurrentIdLbl_ != nullptr) {
+                    mapCurrentIdLbl_->setText(QStringLiteral("Mapa actual: %1").arg(mid));
+                }
+                appendProxyLog(QStringLiteral("[MAP] Detectado mapa actual (ISA/ITX): %1").arg(mid));
+            }
+        }
+    }
+
+    maybeLearnMapTransitMacro(r);
 
     if (packetKindFeedsResourceTotals(r.kind)) {
         updateGatherablesFromProtobufPayload(payload, r.kind);

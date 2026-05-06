@@ -200,6 +200,13 @@ private:
     QPushButton* arrowS_btn_ = nullptr;
     QPushButton* arrowE_btn_ = nullptr;
     QPushButton* arrowO_btn_ = nullptr;
+    QPushButton* recordNorthBtn_ = nullptr;
+    QPushButton* recordSouthBtn_ = nullptr;
+    QPushButton* recordEastBtn_ = nullptr;
+    QPushButton* recordWestBtn_ = nullptr;
+    QLabel* recordMoveStatusLbl_ = nullptr;
+    bool recordMoveArmed_ = false;
+    QString recordMoveDirEs_;
     QPushButton* saveMapTransitMacroBtn_ = nullptr;
     QPushButton* replayMapTransitMacroBtn_ = nullptr;
     QSpinBox* mapTransitMacroDelaySpin_ = nullptr;
@@ -208,6 +215,21 @@ private:
     int mapMacroReplayNextIndex_ = 0;
     int mapMacroReplayDelayMs_ = 250;
     bool mapMacroReplayActive_ = false;
+    QVector<int> mapMacroReplayDelaysMs_;
+
+    // Auto-macros (en memoria) para cambio de mapa por dirección.
+    // Se aprende observando ITR → ITO → PASO MAPA (JNR+ISP) en tráfico C→S.
+    QByteArray mapTransitLastItr_;
+    QByteArray mapTransitLastIto_;
+    QByteArray mapTransitLastHop_;
+    qint64 mapTransitLastItrMs_ = 0;
+    qint64 mapTransitLastItoMs_ = 0;
+    qint64 mapTransitLastHopMs_ = 0;
+    quint64 mapTransitPendingStartMap_ = 0;
+    // {map_id_origen -> {direccionEs -> steps}}
+    QHash<quint64, QHash<QString, QVector<QByteArray>>> mapTransitByStartMapDir_;
+    // {map_id_origen -> {direccionEs -> [delay_ITR_ITO, delay_ITO_HOP]}}
+    QHash<quint64, QHash<QString, QVector<int>>> mapTransitDelaysByStartMapDir_;
 
     QTimer* connMonitorTimer_ = nullptr;
 
@@ -312,6 +334,12 @@ private:
     QString appStyleSheet() const;
     void tryLoadDirectionMapFromField(bool logOk);
     void applyCardinal(const QString& cardinalEs);
+    void applyMapTransitDir(const QString& dirEs);
+    void armRecordMoveDir(const QString& dirEs);
+    void maybeLearnMapTransitMacro(const ProtocolPacketRecord& r);
+    void startMapTransitMacroReplay(const QVector<QByteArray>& steps,
+                                    const QString& whyLogLabel,
+                                    const QVector<int>& delaysMs = {});
     [[nodiscard]] bool packetKindIsClientMapTransitMacro(PacketKind k) const;
     [[nodiscard]] QString defaultMapTransitMacroPath() const;
     void saveMapTransitMacroFromSelection();

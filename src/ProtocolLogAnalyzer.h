@@ -69,12 +69,42 @@ struct ProtocolPacketRecord {
     QByteArray rawPayload;
 };
 
+/// Estructura mínima para recursos (y eventos de recolección) extraída desde Protobuf.
+struct ResourceInfo {
+    quint64 typeId = 0;     // ej. 514663 (Fresno)
+    quint64 instanceId = 0; // id de instancia en mapa (cuando exista)
+    int x = 0;
+    int y = 0;
+    int cell = 0;
+    bool hasXy = false;
+    bool hasCell = false;
+};
+
 struct CharacterSnapshot {
     QString name;
     int level = 0;
     QString classLine;
     int sourcePacketIndex = -1;
 };
+
+/// Coordenadas isométricas internas de Dofus para una celda (MapPoint.as).
+/// El mapa estándar tiene 560 celdas, con MAP_WIDTH=14 y MAP_HEIGHT=20.
+struct DofusCellCoord {
+    int x = 0;
+    int y = 0;
+    bool ok = false;
+};
+
+/// cellId [0..559] -> (x,y) usando la tabla CELLPOS (misma que MapPoint.as).
+[[nodiscard]] DofusCellCoord dofusCellToCoord(int cellId);
+
+/// (x,y) -> cellId [0..559] usando la fórmula de MapPoint.as.
+/// Devuelve -1 si está fuera del mapa o si la paridad no cuadra.
+[[nodiscard]] int dofusCoordToCell(int x, int y);
+
+/// Ruta (sin obstáculos) entre dos celdas usando vecinos 8-dir de MapPoint.
+/// Devuelve una lista de cellIds incluyendo origen y destino; vacía si inválido.
+[[nodiscard]] QList<int> calculateCellPath(int cellFrom, int cellTo);
 
 class PacketTypeOverrides;
 
@@ -112,6 +142,36 @@ void extractProtobufWireNumericScalars(const QByteArray& payload, QList<quint64>
                                                          const QVector<IdRangeRule>& extraRules = {});
 
 [[nodiscard]] quint64 guessMapIdHeuristic(const QByteArray& payload);
+
+/// Extrae map_id "largo" de los paquetes más confiables de mapa.
+/// - ISA: busca el varint que sigue al tag 0x20 dentro del mensaje `type.ankama.com/isa`.
+/// - ITX: busca el varint que sigue al tag 0x18 dentro del mensaje `type.ankama.com/itx`.
+/// Devuelve true si pudo extraer un ID en el rango típico (100M..400M).
+[[nodiscard]] bool tryExtractMapIdLongFromIsaOrItx(const QByteArray& payload, quint64& mapIdOut);
+
+/// Intenta extraer `map_id` desde IRI (field 2 en `iri.cs`).
+[[nodiscard]] bool tryGetIriMapId(const QByteArray& payload, quint64& mapIdOut);
+
+/// Intenta extraer una lista de varints «ruta» desde IRI (field 3: `ket`).
+/// Nota: el tipo `ket` no es un `repeated` directo; esta función hace un best-effort
+/// recolectando varints anidados dentro del field 3.
+[[nodiscard]] bool tryGetIriPathVarints(const QByteArray& payload, QList<quint64>& pathOut);
+
+/// Extrae `type_id` / `instance_id` desde IEV (en el log `fresnoo`: field1=type_id, field2=instance_id).
+[[nodiscard]] bool tryGetIevTapInfo(const QByteArray& payload, ResourceInfo& out);
+
+/// Heurística para ISO: intenta encontrar recursos (type_id + instance_id + cell/coords) recorriendo submensajes.
+/// Útil mientras no tengamos `.proto` / clase C# del snapshot.
+[[nodiscard]] QList<ResourceInfo> extractIsoResourcesHeuristic(const QByteArray& payload);
+
+/// Heurística para ITX: intenta extraer entradas de recursos desde la carga pesada de mapa.
+/// Busca submensajes que contengan un type_id en rango [512000..519999] y, dentro de anidados,
+/// cell (<560) + instance_id (mediano, >1000).
+[[nodiscard]] QList<ResourceInfo> extractResourcesFromItx(const QByteArray& payload);
+
+/// Calcula un camino Manhattan simple entre (x1,y1) y (x2,y2).
+/// Norte: y-1, Sur: y+1, Este: x+1, Oeste: x-1
+[[nodiscard]] QList<QString> calculatePath(int x1, int y1, int x2, int y2);
 
 void guessCharacterFromServerPayload(const QByteArray& payload, int packetIndex, CharacterSnapshot* inOut);
 
